@@ -25,7 +25,8 @@ import {
   Smartphone,
   X,
   BarChart3,
-  SplitSquareHorizontal
+  SplitSquareHorizontal,
+  TrendingUp
 } from 'lucide-react';
 import { getServerUrl } from '../api';
 import LiveClock from './LiveClock';
