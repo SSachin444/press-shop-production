@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PRESS SHOP MFG-2</string>
+    <string name="title_activity_main">PRESS SHOP MFG-2</string>
+    <string name="package_name">com.phaindia.mes</string>
+    <string name="custom_url_scheme">com.phaindia.mes</string>
+</resources>
