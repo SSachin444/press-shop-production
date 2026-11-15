@@ -1,21 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { 
   BarChart3, 
+  TrendingUp, 
+  TrendingDown, 
   Layers, 
   Cpu, 
-  TrendingUp, 
-  AlertOctagon, 
-  Activity, 
+  Clock, 
+  Calendar, 
+  AlertTriangle, 
+  Award, 
   CheckCircle, 
-  ArrowUpRight,
-  TrendingDown
+  Activity, 
+  RefreshCw, 
+  Zap, 
+  Flame, 
+  Sliders,
+  Filter
 } from 'lucide-react';
 import { api } from '../api';
 
 export default function ProductionAnalyticsPage({ selectedDate, selectedShift }) {
-  const [ncData, setNcData] = useState(null);
-  const [tandemData, setTandemData] = useState(null);
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [trendView, setTrendView] = useState('weekly'); // 'weekly' or 'monthly'
 
   useEffect(() => {
     loadAnalytics();
@@ -24,201 +31,575 @@ export default function ProductionAnalyticsPage({ selectedDate, selectedShift })
   const loadAnalytics = async () => {
     try {
       setLoading(true);
-      const [ncRes, tandemRes] = await Promise.all([
-        api.getNcProduction(selectedDate, selectedShift),
-        api.getTandemProduction(selectedDate, selectedShift)
-      ]);
-      setNcData(ncRes);
-      setTandemData(tandemRes);
+      const res = await api.getAnalytics(selectedDate, selectedShift);
+      setData(res);
     } catch (err) {
-      console.error(err);
+      console.error('Failed to load analytics:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const ncMatrix = ncData?.machine_matrix || [];
-  const tandemMatrix = tandemData?.line_matrix || [];
+  if (loading && !data) {
+    return (
+      <div className="page-container" style={{ padding: 40, textAlign: 'center' }}>
+        <RefreshCw size={32} className="spin" style={{ margin: '0 auto 12px', display: 'block', color: '#1E88E5' }} />
+        <div style={{ fontWeight: 700, color: '#475569' }}>Loading Plant Production Analytics...</div>
+      </div>
+    );
+  }
 
-  const combinedTarget = (ncData?.total_target || 0) + (tandemData?.total_target || 0);
-  const combinedActual = (ncData?.total_actual || 0) + (tandemData?.total_actual || 0);
-  const combinedGood = (ncData?.total_good || 0) + (tandemData?.total_good || 0);
-  const combinedRej = (ncData?.total_rejected || 0) + (tandemData?.total_rejected || 0);
-  const combinedDowntime = (ncData?.total_downtime || 0) + (tandemData?.total_downtime || 0);
-  const combinedAchievement = combinedTarget > 0 ? Math.round((combinedActual / combinedTarget) * 100) : 0;
-  const combinedRejectionRate = combinedActual > 0 ? ((combinedRej / combinedActual) * 100).toFixed(1) : 0;
+  const shiftTot = data?.shift_totals || { target: 0, actual: 0, good: 0, rejected: 0, downtime: 0, active_machines: 0 };
+  const dayTot = data?.day_totals || { target: 0, actual: 0, good: 0, rejected: 0, downtime: 0 };
+  const nc = data?.nc_data || { target: 0, actual: 0, good: 0, rejected: 0, downtime: 0 };
+  const tandem = data?.tandem_data || { target: 0, actual: 0, good: 0, rejected: 0, downtime: 0 };
+  const rankings = data?.machine_rankings || [];
+  const weekly = data?.weekly_trend || [];
+  const monthly = data?.monthly_trend || [];
+  const lossAnalysis = data?.loss_analysis || [];
+  const bestMachine = data?.best_machine;
+  const lowestMachine = data?.lowest_machine;
+  const bestShift = data?.best_shift;
+
+  // Calculate Average Daily Production
+  const weeklyActuals = weekly.map(w => w.actual).filter(a => a > 0);
+  const avgDaily = weeklyActuals.length > 0 
+    ? Math.round(weeklyActuals.reduce((a, b) => a + b, 0) / weeklyActuals.length) 
+    : dayTot.actual;
+
+  // Max value for weekly bar scaling
+  const maxWeeklyVal = Math.max(...weekly.map(w => Math.max(w.target, w.actual, 100)), 500);
+
+  // Max value for monthly bar scaling
+  const maxMonthlyVal = Math.max(...monthly.map(m => Math.max(m.actual, 100)), 500);
+
+  // Loss analysis total minutes
+  const totalLossMinutes = lossAnalysis.reduce((acc, l) => acc + (l.total_minutes || 0), 0);
 
   return (
-    <div className="page-container">
-      {/* Header */}
-      <div className="card-panel">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <BarChart3 size={22} color="#1e40af" />
-              <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#0f172a' }}>Management Production Analytics Dashboard</h2>
+    <div className="page-container" style={{ padding: '20px', maxWidth: 1400, margin: '0 auto' }}>
+      
+      {/* Top Header Panel */}
+      <div className="card-panel" style={{ background: '#ffffff', borderRadius: 12, padding: '20px', border: '1px solid #E2E8F0', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ 
+              width: 48, 
+              height: 48, 
+              borderRadius: 12, 
+              background: '#EFF6FF', 
+              color: '#1E88E5', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center',
+              boxShadow: '0 2px 6px rgba(30,136,229,0.15)'
+            }}>
+              <Activity size={26} />
             </div>
-            <p style={{ color: '#64748b', fontSize: '0.84rem', marginTop: 2 }}>
-              Executive performance intelligence • Visually distinct NC Press & Tandem Line tracking • Date: <strong style={{ color: '#1e40af' }}>{selectedDate}</strong> ({selectedShift})
-            </p>
+            <div>
+              <h1 style={{ fontSize: '1.4rem', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+                Factory Production Analytics & Intelligence
+              </h1>
+              <p style={{ margin: '4px 0 0', fontSize: '0.84rem', color: '#64748B' }}>
+                PHA INDIA PRIVATE LIMITED • Date: <strong style={{ color: '#1E88E5' }}>{selectedDate}</strong> • Shift: <strong style={{ color: '#1E88E5' }}>{selectedShift}</strong>
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={loadAnalytics}
+            className="btn btn-secondary"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '9px 16px',
+              borderRadius: 8,
+              border: '1px solid #CBD5E1',
+              background: '#F8FAFC',
+              fontWeight: 700,
+              cursor: 'pointer',
+              color: '#334155'
+            }}
+          >
+            <RefreshCw size={16} className={loading ? 'spin' : ''} />
+            <span>Refresh Analytics</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 1. TOP 4 KEY INDUSTRIAL METRICS */}
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', 
+        gap: 16, 
+        marginBottom: 20 
+      }}>
+        {/* Metric 1: Production Efficiency */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #E2E8F0', borderLeft: '4px solid #1E88E5' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#64748B', textTransform: 'uppercase' }}>Production Efficiency</span>
+            <Zap size={18} color="#1E88E5" />
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: 900, color: '#0F172A' }}>
+            {data?.efficiency_pct || 0}%
+          </div>
+          <div style={{ fontSize: '0.75rem', color: data?.efficiency_pct >= 85 ? '#059669' : '#D97706', fontWeight: 700, marginTop: 4 }}>
+            {data?.efficiency_pct >= 85 ? 'Optimal Plant Operating Rate' : 'Below Target Efficiency Threshold'}
           </div>
         </div>
 
-        {/* Combined Factory Summary */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginTop: 18 }}>
-          <div style={{ background: '#f8fafc', padding: '14px', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 600 }}>FACTORY TARGET</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#0f172a' }}>{combinedTarget.toLocaleString()}</div>
-            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>NC + Tandem total</div>
+        {/* Metric 2: Target Achievement */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #E2E8F0', borderLeft: '4px solid #00B074' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#64748B', textTransform: 'uppercase' }}>Target Achievement</span>
+            <CheckCircle size={18} color="#00B074" />
           </div>
-
-          <div style={{ background: '#eff6ff', padding: '14px', borderRadius: 8, border: '1px solid #bfdbfe' }}>
-            <div style={{ fontSize: '0.72rem', color: '#1d4ed8', fontWeight: 600 }}>TOTAL ACTUAL OUTPUT</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#1e40af' }}>{combinedActual.toLocaleString()}</div>
-            <div style={{ fontSize: '0.72rem', color: '#1d4ed8', fontWeight: 600 }}>{combinedAchievement}% Plant Achievement</div>
+          <div style={{ fontSize: '2rem', fontWeight: 900, color: '#059669' }}>
+            {shiftTot.target > 0 ? Math.round((shiftTot.actual / shiftTot.target) * 100) : 0}%
           </div>
-
-          <div style={{ background: '#ecfdf5', padding: '14px', borderRadius: 8, border: '1px solid #a7f3d0' }}>
-            <div style={{ fontSize: '0.72rem', color: '#047857', fontWeight: 600 }}>QUALITY GOOD PARTS</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#059669' }}>{combinedGood.toLocaleString()}</div>
-            <div style={{ fontSize: '0.72rem', color: '#047857' }}>Passes QA specifications</div>
+          <div style={{ fontSize: '0.75rem', color: '#64748B', marginTop: 4 }}>
+            Actual <strong>{shiftTot.actual.toLocaleString()}</strong> of <strong>{shiftTot.target.toLocaleString()}</strong> pcs
           </div>
+        </div>
 
-          <div style={{ background: '#fef2f2', padding: '14px', borderRadius: 8, border: '1px solid #fecaca' }}>
-            <div style={{ fontSize: '0.72rem', color: '#b91c1c', fontWeight: 600 }}>FACTORY SCRAP</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#dc2626' }}>{combinedRej.toLocaleString()}</div>
-            <div style={{ fontSize: '0.72rem', color: '#b91c1c' }}>{combinedRejectionRate}% Scrap Rate</div>
+        {/* Metric 3: Average Hourly Production */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #E2E8F0', borderLeft: '4px solid #7C4DFF' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#64748B', textTransform: 'uppercase' }}>Avg Hourly Production</span>
+            <Clock size={18} color="#7C4DFF" />
           </div>
+          <div style={{ fontSize: '2rem', fontWeight: 900, color: '#7C4DFF' }}>
+            {data?.avg_hourly_production || 0} <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#64748B' }}>pcs/hr</span>
+          </div>
+          <div style={{ fontSize: '0.75rem', color: '#64748B', marginTop: 4 }}>
+            Active across running presses
+          </div>
+        </div>
 
-          <div style={{ background: '#fffbeb', padding: '14px', borderRadius: 8, border: '1px solid #fde68a' }}>
-            <div style={{ fontSize: '0.72rem', color: '#b45309', fontWeight: 600 }}>COMBINED DOWNTIME</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#d97706' }}>{combinedDowntime}m</div>
-            <div style={{ fontSize: '0.72rem', color: '#b45309' }}>Lost machine minutes</div>
+        {/* Metric 4: Average Daily Production */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #E2E8F0', borderLeft: '4px solid #0891B2' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#64748B', textTransform: 'uppercase' }}>Avg Daily Output</span>
+            <Calendar size={18} color="#0891B2" />
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: 900, color: '#0891B2' }}>
+            {avgDaily.toLocaleString()} <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#64748B' }}>pcs/day</span>
+          </div>
+          <div style={{ fontSize: '0.75rem', color: '#64748B', marginTop: 4 }}>
+            7-day rolling daily output average
           </div>
         </div>
       </div>
 
-      {/* SECTION 1: NC PRODUCTION ANALYTICS (16 POSITIONS) */}
-      <div className="card-panel">
-        <div className="panel-header">
-          <div>
-            <div className="panel-title">
-              <Layers size={20} color="#7c3aed" />
-              <span>NC Presses Machine-Wise Comparative Output (16 Machines)</span>
+      {/* 2. THREE HIGHLIGHT CARDS: BEST MACHINE, LOWEST MACHINE, BEST SHIFT */}
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+        gap: 16, 
+        marginBottom: 20 
+      }}>
+        {/* Best Performing Machine */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #A7F3D0', background: 'linear-gradient(180deg, #F0FDF4 0%, #FFFFFF 100%)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <div style={{ background: '#DCFCE7', color: '#16A34A', padding: 8, borderRadius: 10 }}>
+              <Award size={20} />
             </div>
-            <div className="panel-subtitle">Individual output versus target for all 16 designated NC positions</div>
+            <div>
+              <div style={{ fontSize: '0.75rem', fontWeight: 800, color: '#16A34A', textTransform: 'uppercase' }}>Best Performing Machine</div>
+              <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0F172A', margin: 0 }}>
+                {bestMachine?.machine_or_line || 'No Data'}
+              </h3>
+            </div>
           </div>
-          <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#7c3aed', background: '#faf5ff', padding: '4px 10px', borderRadius: 20 }}>
-            NC Achievement: {ncData?.achievement_pct || 0}%
-          </span>
+          {bestMachine ? (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#334155' }}>
+              <div>Actual Output: <strong style={{ color: '#059669' }}>{bestMachine.actual.toLocaleString()}</strong> pcs</div>
+              <div>Achievement: <strong style={{ color: '#059669' }}>{bestMachine.achievement_pct}%</strong></div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.82rem', color: '#94A3B8' }}>Awaiting production logs for today</div>
+          )}
         </div>
 
-        {/* Machine-by-Machine Visual Bar Chart */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-          {ncMatrix.map((m) => {
-            const pct = m.achievement_pct;
-            return (
-              <div key={m.machine_number} style={{ display: 'grid', gridTemplateColumns: '90px 1fr 140px 90px', alignItems: 'center', gap: 14 }}>
-                <div style={{ fontWeight: 700, fontSize: '0.86rem', color: '#475569' }}>
-                  {m.machine_number} <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>({m.tonnage}T)</span>
-                </div>
-                <div style={{ position: 'relative', height: 22, background: '#f1f5f9', borderRadius: 4, overflow: 'hidden' }}>
-                  <div 
-                    style={{ 
-                      width: `${Math.min(100, pct)}%`, 
-                      height: '100%', 
-                      background: pct >= 90 ? 'linear-gradient(90deg, #7c3aed, #a855f7)' : pct > 0 ? '#818cf8' : '#e2e8f0',
-                      borderRadius: 4,
-                      transition: 'width 0.4s ease'
-                    }} 
-                  />
-                  {pct > 15 && (
-                    <span style={{ position: 'absolute', left: 10, top: 2, fontSize: '0.75rem', fontWeight: 700, color: '#ffffff' }}>
-                      {m.actual} pcs
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: '0.82rem', color: '#475569', textAlign: 'right' }}>
-                  Target: <strong>{m.target}</strong>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <span style={{ 
-                    fontWeight: 800, 
-                    fontSize: '0.86rem', 
-                    color: pct >= 90 ? '#059669' : pct > 0 ? '#2563eb' : '#94a3b8' 
-                  }}>
-                    {pct}%
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+        {/* Lowest Performing Machine */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #FECACA', background: 'linear-gradient(180deg, #FEF2F2 0%, #FFFFFF 100%)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <div style={{ background: '#FEE2E2', color: '#DC2626', padding: 8, borderRadius: 10 }}>
+              <TrendingDown size={20} />
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', fontWeight: 800, color: '#DC2626', textTransform: 'uppercase' }}>Lowest Performing Machine</div>
+              <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0F172A', margin: 0 }}>
+                {lowestMachine?.machine_or_line || 'No Data'}
+              </h3>
+            </div>
+          </div>
+          {lowestMachine ? (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#334155' }}>
+              <div>Actual Output: <strong style={{ color: '#DC2626' }}>{lowestMachine.actual.toLocaleString()}</strong> pcs</div>
+              <div>Downtime: <strong style={{ color: '#DC2626' }}>{lowestMachine.downtime}m</strong></div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.82rem', color: '#94A3B8' }}>Awaiting production logs for today</div>
+          )}
+        </div>
+
+        {/* Best Performing Shift */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '18px 20px', border: '1px solid #BFDBFE', background: 'linear-gradient(180deg, #EFF6FF 0%, #FFFFFF 100%)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <div style={{ background: '#DBEAFE', color: '#1E40AF', padding: 8, borderRadius: 10 }}>
+              <Flame size={20} />
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', fontWeight: 800, color: '#1E40AF', textTransform: 'uppercase' }}>Best Performing Shift</div>
+              <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0F172A', margin: 0 }}>
+                {bestShift?.shift || 'No Data'}
+              </h3>
+            </div>
+          </div>
+          {bestShift ? (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#334155' }}>
+              <div>Shift Output: <strong style={{ color: '#1E40AF' }}>{bestShift.actual.toLocaleString()}</strong> pcs</div>
+              <div>Target: <strong>{bestShift.target.toLocaleString()}</strong> pcs</div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.82rem', color: '#94A3B8' }}>Awaiting shift production logs</div>
+          )}
         </div>
       </div>
 
-      {/* SECTION 2: TANDEM PRODUCTION ANALYTICS (6 LINES) */}
-      <div className="card-panel">
-        <div className="panel-header">
-          <div>
-            <div className="panel-title">
-              <Cpu size={20} color="#0891b2" />
-              <span>Tandem Production Lines Comparison (LP-1, LP-2, HP-1, HP-2, HP-3, HP-4)</span>
-            </div>
-            <div className="panel-subtitle">Individual output versus target for all 6 designated tandem lines</div>
+      {/* 3. NC PRESS VS TANDEM PRODUCTION COMPARISON */}
+      <div className="card-panel" style={{ background: '#ffffff', borderRadius: 12, padding: '20px', border: '1px solid #E2E8F0', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <BarChart3 size={20} color="#1E88E5" />
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+              NC Press vs Tandem Production Comparison ({selectedShift})
+            </h3>
           </div>
-          <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#0891b2', background: '#ecfeff', padding: '4px 10px', borderRadius: 20 }}>
-            Tandem Achievement: {tandemData?.achievement_pct || 0}%
-          </span>
         </div>
 
-        {/* 6 Line Cards Side-by-Side Visual */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
-          {tandemMatrix.map((line) => {
-            const isHigh = line.line_number.startsWith('HP');
-            return (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+          {/* NC Press Stats */}
+          <div style={{ background: '#F8FAFC', padding: 18, borderRadius: 10, border: '1px solid #E2E8F0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <Layers size={18} color="#2563EB" />
+              <strong style={{ fontSize: '1rem', color: '#1E293B' }}>NC Presses (16 Units)</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Actual Output:</span>
+              <strong style={{ color: '#2563EB', fontSize: '1.1rem' }}>{nc.actual.toLocaleString()} pcs</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Shift Target:</span>
+              <strong style={{ color: '#0F172A' }}>{nc.target.toLocaleString()} pcs</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Achievement:</span>
+              <strong style={{ color: nc.target > 0 && (nc.actual / nc.target) >= 0.85 ? '#059669' : '#D97706' }}>
+                {nc.target > 0 ? Math.round((nc.actual / nc.target) * 100) : 0}%
+              </strong>
+            </div>
+            <div style={{ height: 10, background: '#E2E8F0', borderRadius: 5, overflow: 'hidden', marginTop: 10 }}>
               <div 
-                key={line.line_number} 
                 style={{ 
-                  border: '1px solid #cbd5e1', 
-                  borderRadius: 10, 
-                  padding: 16, 
-                  background: isHigh ? '#f0fdf4' : '#f0f9ff',
-                  borderTop: `4px solid ${line.achievement_pct >= 90 ? '#10b981' : '#0891b2'}` 
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong style={{ fontSize: '1.15rem', color: '#0f172a' }}>{line.line_number}</strong>
-                  <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', background: '#ffffff', padding: '2px 8px', borderRadius: 4 }}>
-                    {line.tonnage} Tons
-                  </span>
-                </div>
+                  height: '100%', 
+                  width: `${nc.target > 0 ? Math.min(100, Math.round((nc.actual / nc.target) * 100)) : 0}%`, 
+                  background: '#2563EB',
+                  borderRadius: 5,
+                  transition: 'width 0.4s'
+                }} 
+              />
+            </div>
+          </div>
 
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', margin: '8px 0' }}>
-                  <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Actual / Target:</span>
-                  <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#0891b2' }}>
-                    {line.actual} <span style={{ fontSize: '0.9rem', color: '#64748b' }}>/ {line.target}</span>
-                  </span>
-                </div>
-
-                <div className="machine-progress-bar" style={{ height: 10, marginBottom: 8 }}>
-                  <div 
-                    className="machine-progress-fill" 
-                    style={{ 
-                      width: `${Math.min(100, line.achievement_pct)}%`, 
-                      background: line.achievement_pct >= 90 ? '#10b981' : '#0891b2' 
-                    }} 
-                  />
-                </div>
-
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: '#475569' }}>
-                  <span>Achievement: <strong>{line.achievement_pct}%</strong></span>
-                  <span>Downtime: <strong style={{ color: line.downtime_minutes > 0 ? '#dc2626' : '#475569' }}>{line.downtime_minutes}m</strong></span>
-                </div>
-              </div>
-            );
-          })}
+          {/* Tandem Lines Stats */}
+          <div style={{ background: '#F8FAFC', padding: 18, borderRadius: 10, border: '1px solid #E2E8F0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <Cpu size={18} color="#059669" />
+              <strong style={{ fontSize: '1rem', color: '#1E293B' }}>Tandem Lines (LP-1..2, HP-1..4)</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Actual Output:</span>
+              <strong style={{ color: '#059669', fontSize: '1.1rem' }}>{tandem.actual.toLocaleString()} pcs</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Shift Target:</span>
+              <strong style={{ color: '#0F172A' }}>{tandem.target.toLocaleString()} pcs</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: '0.84rem' }}>
+              <span style={{ color: '#64748B' }}>Achievement:</span>
+              <strong style={{ color: tandem.target > 0 && (tandem.actual / tandem.target) >= 0.85 ? '#059669' : '#D97706' }}>
+                {tandem.target > 0 ? Math.round((tandem.actual / tandem.target) * 100) : 0}%
+              </strong>
+            </div>
+            <div style={{ height: 10, background: '#E2E8F0', borderRadius: 5, overflow: 'hidden', marginTop: 10 }}>
+              <div 
+                style={{ 
+                  height: '100%', 
+                  width: `${tandem.target > 0 ? Math.min(100, Math.round((tandem.actual / tandem.target) * 100)) : 0}%`, 
+                  background: '#059669',
+                  borderRadius: 5,
+                  transition: 'width 0.4s'
+                }} 
+              />
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* 4. HISTORICAL PRODUCTION TRENDS (WEEKLY & MONTHLY) */}
+      <div className="card-panel" style={{ background: '#ffffff', borderRadius: 12, padding: '20px', border: '1px solid #E2E8F0', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <TrendingUp size={20} color="#1E88E5" />
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+              Plant Production Volume Trends
+            </h3>
+          </div>
+
+          <div style={{ display: 'flex', background: '#F1F5F9', padding: 3, borderRadius: 8 }}>
+            <button
+              onClick={() => setTrendView('weekly')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: 'none',
+                background: trendView === 'weekly' ? '#ffffff' : 'transparent',
+                color: trendView === 'weekly' ? '#0F172A' : '#64748B',
+                fontWeight: 700,
+                fontSize: '0.78rem',
+                cursor: 'pointer',
+                boxShadow: trendView === 'weekly' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+              }}
+            >
+              Weekly Trend (7 Days)
+            </button>
+            <button
+              onClick={() => setTrendView('monthly')}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: 'none',
+                background: trendView === 'monthly' ? '#ffffff' : 'transparent',
+                color: trendView === 'monthly' ? '#0F172A' : '#64748B',
+                fontWeight: 700,
+                fontSize: '0.78rem',
+                cursor: 'pointer',
+                boxShadow: trendView === 'monthly' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+              }}
+            >
+              Monthly Trend (30 Days)
+            </button>
+          </div>
+        </div>
+
+        {trendView === 'weekly' ? (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: '#64748B', marginBottom: 14 }}>
+              Blue bars represent Actual Output; Grey markers represent Production Target.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${weekly.length || 7}, 1fr)`, gap: 12, alignItems: 'flex-end', height: 200, paddingBottom: 24, borderBottom: '1px solid #E2E8F0' }}>
+              {weekly.map((w, idx) => {
+                const actHeight = Math.round((w.actual / maxWeeklyVal) * 160);
+                const tgtHeight = Math.round((w.target / maxWeeklyVal) * 160);
+                const isSelected = w.date === selectedDate;
+                return (
+                  <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', justifyContent: 'flex-end' }}>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#1E88E5', marginBottom: 4 }}>
+                      {w.actual > 0 ? w.actual : ''}
+                    </div>
+                    <div style={{ width: '100%', maxWidth: 36, display: 'flex', gap: 3, alignItems: 'flex-end', justifyContent: 'center' }}>
+                      {/* Target bar */}
+                      <div 
+                        title={`Target: ${w.target}`}
+                        style={{ 
+                          width: 8, 
+                          height: `${Math.max(4, tgtHeight)}px`, 
+                          background: '#CBD5E1', 
+                          borderRadius: '3px 3px 0 0' 
+                        }} 
+                      />
+                      {/* Actual bar */}
+                      <div 
+                        title={`Actual: ${w.actual}`}
+                        style={{ 
+                          width: 20, 
+                          height: `${Math.max(4, actHeight)}px`, 
+                          background: isSelected ? 'linear-gradient(180deg, #1E88E5 0%, #1565C0 100%)' : '#60A5FA', 
+                          borderRadius: '4px 4px 0 0' 
+                        }} 
+                      />
+                    </div>
+                    <div style={{ marginTop: 8, textAlign: 'center' }}>
+                      <div style={{ fontSize: '0.75rem', fontWeight: isSelected ? 800 : 600, color: isSelected ? '#1E88E5' : '#475569' }}>
+                        {w.day}
+                      </div>
+                      <div style={{ fontSize: '0.66rem', color: '#94A3B8' }}>{w.date.slice(5)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: '#64748B', marginBottom: 14 }}>
+              Daily production volume recorded across the past 30 operating days.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${monthly.length || 30}, 1fr)`, gap: 3, alignItems: 'flex-end', height: 180, paddingBottom: 20, borderBottom: '1px solid #E2E8F0' }}>
+              {monthly.map((m, idx) => {
+                const actHeight = Math.round((m.actual / maxMonthlyVal) * 140);
+                const isSelected = m.date === selectedDate;
+                return (
+                  <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', justifyContent: 'flex-end' }}>
+                    <div 
+                      title={`${m.date}: ${m.actual} pcs`}
+                      style={{ 
+                        width: '100%', 
+                        height: `${Math.max(3, actHeight)}px`, 
+                        background: isSelected ? '#1E88E5' : m.actual > 0 ? '#38BDF8' : '#F1F5F9', 
+                        borderRadius: '2px 2px 0 0' 
+                      }} 
+                    />
+                    <div style={{ marginTop: 6, fontSize: '0.62rem', color: isSelected ? '#1E88E5' : '#94A3B8' }}>
+                      {m.day}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 5. PRODUCTION LOSS ANALYSIS (PARETO BREAKDOWN) */}
+      <div className="card-panel" style={{ background: '#ffffff', borderRadius: 12, padding: '20px', border: '1px solid #E2E8F0', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <AlertTriangle size={20} color="#DC2626" />
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+              Production Loss Analysis (Downtime Root Causes)
+            </h3>
+          </div>
+          <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#DC2626', background: '#FEE2E2', padding: '4px 10px', borderRadius: 20 }}>
+            {totalLossMinutes} Total Lost Minutes Today
+          </span>
+        </div>
+
+        {lossAnalysis.length === 0 ? (
+          <div style={{ padding: '30px 20px', textAlign: 'center', background: '#F8FAFC', borderRadius: 8, color: '#64748B', fontSize: '0.86rem' }}>
+            No recorded downtime incidents for the selected date. Factory operating at zero recorded lost hours.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {lossAnalysis.map((loss, idx) => {
+              const pctOfLoss = totalLossMinutes > 0 ? Math.round((loss.total_minutes / totalLossMinutes) * 100) : 0;
+              return (
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 100px 70px', alignItems: 'center', gap: 14, fontSize: '0.84rem' }}>
+                  <div style={{ fontWeight: 700, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {loss.downtime_reason}
+                  </div>
+                  <div style={{ height: 16, background: '#F1F5F9', borderRadius: 4, overflow: 'hidden' }}>
+                    <div 
+                      style={{ 
+                        height: '100%', 
+                        width: `${pctOfLoss}%`, 
+                        background: 'linear-gradient(90deg, #EF4444 0%, #DC2626 100%)', 
+                        borderRadius: 4 
+                      }} 
+                    />
+                  </div>
+                  <div style={{ textAlign: 'right', fontWeight: 700, color: '#DC2626' }}>
+                    {loss.total_minutes} mins
+                  </div>
+                  <div style={{ textAlign: 'right', fontWeight: 800, color: '#64748B', fontSize: '0.78rem' }}>
+                    {pctOfLoss}%
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 6. MACHINE UTILIZATION & RANKINGS TABLE */}
+      <div className="card-panel" style={{ background: '#ffffff', borderRadius: 12, padding: '20px', border: '1px solid #E2E8F0' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Sliders size={20} color="#0891B2" />
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+              Equipment Performance & Output Rankings
+            </h3>
+          </div>
+          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0F172A', background: '#F1F5F9', padding: '4px 10px', borderRadius: 20 }}>
+            {rankings.length} Machines Recorded
+          </span>
+        </div>
+
+        {rankings.length === 0 ? (
+          <div style={{ padding: '30px 20px', textAlign: 'center', background: '#F8FAFC', borderRadius: 8, color: '#64748B', fontSize: '0.86rem' }}>
+            No machine production records logged for the selected date.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.84rem' }}>
+              <thead>
+                <tr style={{ background: '#F8FAFC', borderBottom: '2px solid #E2E8F0', color: '#475569' }}>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Rank</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Machine / Line</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Type</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Actual Output</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Target</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Achievement %</th>
+                  <th style={{ padding: '10px 12px', fontWeight: 700 }}>Downtime</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rankings.map((r, idx) => {
+                  const pct = r.achievement_pct || 0;
+                  return (
+                    <tr key={idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                      <td style={{ padding: '10px 12px', fontWeight: 800, color: idx === 0 ? '#16A34A' : '#64748B' }}>
+                        #{idx + 1}
+                      </td>
+                      <td style={{ padding: '10px 12px', fontWeight: 800, color: '#0F172A' }}>
+                        {r.machine_or_line}
+                      </td>
+                      <td style={{ padding: '10px 12px', color: '#64748B' }}>
+                        {r.production_type}
+                      </td>
+                      <td style={{ padding: '10px 12px', fontWeight: 700, color: '#059669' }}>
+                        {Number(r.actual).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '10px 12px', color: '#475569' }}>
+                        {Number(r.target).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '10px 12px' }}>
+                        <span style={{
+                          padding: '3px 8px',
+                          borderRadius: 6,
+                          fontWeight: 800,
+                          fontSize: '0.78rem',
+                          background: pct >= 90 ? '#ECFDF5' : pct >= 70 ? '#EFF6FF' : '#FEF2F2',
+                          color: pct >= 90 ? '#065F46' : pct >= 70 ? '#1E40AF' : '#991B1B'
+                        }}>
+                          {pct}%
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 12px', fontWeight: r.downtime > 0 ? 700 : 400, color: r.downtime > 0 ? '#DC2626' : '#64748B' }}>
+                        {r.downtime > 0 ? `${r.downtime}m` : '0m'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }

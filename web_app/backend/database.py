@@ -200,11 +200,45 @@ def init_db():
     )
     """)
 
-    # Ensure tool_number column exists in production_records
+    # Ensure tool_number & supervisor_name columns exist in production_records
     try:
         cursor.execute("ALTER TABLE production_records ADD COLUMN tool_number TEXT DEFAULT ''")
     except Exception:
         pass
+
+    try:
+        cursor.execute("ALTER TABLE production_records ADD COLUMN supervisor_name TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    # 11. Activity Logs for Audit History
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_name TEXT NOT NULL,
+        action TEXT NOT NULL,
+        record_type TEXT NOT NULL,
+        record_id TEXT,
+        details TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # 12. Machine Breakdown and Downtime Logs
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS machine_downtime (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        machine_number TEXT NOT NULL,
+        breakdown_start TEXT NOT NULL,
+        breakdown_end TEXT,
+        breakdown_reason TEXT NOT NULL,
+        total_downtime_minutes INTEGER DEFAULT 0,
+        remarks TEXT,
+        reported_by TEXT,
+        status TEXT DEFAULT 'Open' CHECK(status IN ('Open', 'Resolved', 'Under Repair')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
     conn.commit()
 

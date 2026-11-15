@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
 import WiFiServerModal from './components/WiFiServerModal';
+import NotificationModal from './components/NotificationModal';
 import MobileNavBar from './components/MobileNavBar';
 
 // Pages
@@ -24,6 +25,8 @@ import SettingsPage from './pages/SettingsPage';
 // New Production Pages (Phase 2 Upgrade)
 import ProductionWorkspacePage from './pages/ProductionWorkspacePage';
 import ProductionDashboardPage from './pages/ProductionDashboardPage';
+import ProductionAnalyticsPage from './pages/ProductionAnalyticsPage';
+import ActivityLogPage from './pages/ActivityLogPage';
 
 import { api, getServerUrl } from './api';
 
@@ -54,10 +57,27 @@ export default function App() {
   });
 
   const [showWifiModal, setShowWifiModal] = useState(false);
+  const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [notifications, setNotifications] = useState([]);
 
   useEffect(() => {
     loadInitialState();
   }, [syncKey]);
+
+  useEffect(() => {
+    loadNotifications();
+  }, [selectedDate, selectedShift, syncKey]);
+
+  const loadNotifications = async () => {
+    try {
+      const res = await api.getNotifications(selectedDate, selectedShift);
+      if (res && res.notifications) {
+        setNotifications(res.notifications);
+      }
+    } catch (e) {
+      console.warn('Notification sync notice:', e);
+    }
+  };
 
   const loadInitialState = async () => {
     try {
@@ -112,6 +132,8 @@ export default function App() {
       // New Production Pages
       case 'standard-production': return 'Production Workspace (Standard + Hourly)';
       case 'production-dashboard': return 'Production Intelligence Dashboard';
+      case 'analytics': return 'Plant Production Analytics & Trends';
+      case 'activity-logs': return 'System Audit Activity Log';
       default: return 'PRESS SHOP MFG-2';
     }
   };
@@ -164,6 +186,8 @@ export default function App() {
           onOpenLogin={handleSwitchRole}
           onOpenWifiModal={() => setShowWifiModal(true)}
           onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+          notificationCount={notifications.length}
+          onOpenNotifications={() => setShowNotificationModal(true)}
         />
 
         <main className="content-area" style={{ 
@@ -319,6 +343,22 @@ export default function App() {
               setActiveTab={setActiveTab}
             />
           )}
+
+          {/* 16. Plant Analytics & Trends */}
+          {activeTab === 'analytics' && (
+            <ProductionAnalyticsPage
+              key={`analytics-${syncKey}`}
+              selectedDate={selectedDate}
+              selectedShift={selectedShift}
+            />
+          )}
+
+          {/* 17. System Activity Logs */}
+          {activeTab === 'activity-logs' && (
+            <ActivityLogPage
+              key={`actlog-${syncKey}`}
+            />
+          )}
         </main>
       </div>
 
@@ -338,6 +378,15 @@ export default function App() {
         isOpen={showWifiModal} 
         onClose={() => setShowWifiModal(false)}
         onServerChanged={() => setSyncKey(k => k + 1)}
+      />
+
+      {/* Plant Notifications & Alerts Modal */}
+      <NotificationModal 
+        isOpen={showNotificationModal} 
+        onClose={() => setShowNotificationModal(false)}
+        notifications={notifications}
+        onClearAll={() => setNotifications([])}
+        onDismiss={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
       />
     </div>
   );

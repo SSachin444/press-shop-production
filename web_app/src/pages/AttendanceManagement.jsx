@@ -26,31 +26,11 @@ export default function AttendanceManagement({ selectedDate, selectedShift = 'Sh
   const [saving, setSaving] = useState(false);
   const [notification, setNotification] = useState(null);
 
-  const defaultList = [
-    { emp_id: 'A20755', name: 'SACHIN S', designation: 'Operator', shift: 'Shift A', status: 'Present' },
-    { emp_id: 'A20556', name: 'SRIRAM', designation: 'Operator', shift: 'Shift A', status: 'Present' },
-    { emp_id: 'A20821', name: 'KARTHIK M', designation: 'Helper', shift: 'Shift B', status: 'Absent' },
-    { emp_id: 'A20112', name: 'MURUGAN R', designation: 'Line Lead', shift: 'Shift A', status: 'Present' },
-    { emp_id: 'A20340', name: 'SURESH K', designation: 'Operator', shift: 'Shift A', status: 'Present' },
-    { emp_id: 'A20455', name: 'PRAKASH M', designation: 'Operator', shift: 'Shift B', status: 'Present' },
-    { emp_id: 'A20610', name: 'ANAND T', designation: 'Operator', shift: 'Shift C', status: 'Present' },
-    { emp_id: 'A20722', name: 'RAJESH P', designation: 'Operator', shift: 'Shift C', status: 'Absent' }
-  ];
-
-  useEffect(() => {
-    loadAttendance();
-  }, [activeDate, selectedShift]);
-
-  const showNotice = (type, message) => {
-    setNotification({ type, message });
-    setTimeout(() => setNotification(null), 4000);
-  };
-
   const loadAttendance = async () => {
     try {
       setLoading(true);
       const res = await api.getAttendance({ date: activeDate, shift: selectedShift });
-      const list = res.roster && res.roster.length > 0 ? res.roster : defaultList;
+      const list = res.roster || [];
       setRoster(list);
 
       const map = {};
@@ -59,12 +39,8 @@ export default function AttendanceManagement({ selectedDate, selectedShift = 'Sh
       });
       setAttendanceMap(map);
     } catch (e) {
-      setRoster(defaultList);
-      const map = {};
-      defaultList.forEach(emp => {
-        map[emp.emp_id] = emp.status;
-      });
-      setAttendanceMap(map);
+      setRoster([]);
+      setAttendanceMap({});
     } finally {
       setLoading(false);
     }

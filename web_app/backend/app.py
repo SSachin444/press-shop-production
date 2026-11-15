@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import csv
 import io
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from database import get_db, init_db, hash_password, get_full_state, get_current_shift, DB_PATH, save_app_state, get_app_state
@@ -467,7 +467,84 @@ def get_dashboard_kpis():
     """)
     recent_attendance = [dict(row) for row in cursor.fetchall()]
 
+    # Weekly trend (last 7 days)
+    weekly_trend = []
+    try:
+        cur_d = datetime.strptime(selected_date, "%Y-%m-%d").date()
+    except Exception:
+        cur_d = date.today()
+    for i in range(6, -1, -1):
+        d_str = (cur_d - timedelta(days=i)).isoformat()
+        cursor.execute("""
+        SELECT COALESCE(SUM(target_qty), 0) as tgt, COALESCE(SUM(actual_qty), 0) as act
+        FROM production_records WHERE date = ?
+        """, (d_str,))
+        w_row = cursor.fetchone()
+        weekly_trend.append({
+            "date": d_str,
+            "day": (cur_d - timedelta(days=i)).strftime("%a"),
+            "target": w_row[0],
+            "actual": w_row[1]
+        })
+
+    # Monthly trend (last 30 days)
+    monthly_trend = []
+    for i in range(29, -1, -1):
+        d_str = (cur_d - timedelta(days=i)).isoformat()
+        cursor.execute("""
+        SELECT COALESCE(SUM(target_qty), 0) as tgt, COALESCE(SUM(actual_qty), 0) as act
+        FROM production_records WHERE date = ?
+        """, (d_str,))
+        m_row = cursor.fetchone()
+        monthly_trend.append({
+            "date": d_str,
+            "day": d_str[8:],
+            "target": m_row[0],
+            "actual": m_row[1]
+        })
+
+    # Machine-wise production today
+    cursor.execute("""
+    SELECT machine_or_line, production_type,
+           COALESCE(SUM(target_qty), 0) as target,
+           COALESCE(SUM(actual_qty), 0) as actual,
+           COALESCE(SUM(good_qty), 0) as good,
+           COALESCE(SUM(rejected_qty), 0) as rejected,
+           COALESCE(SUM(downtime_minutes), 0) as downtime
+    FROM production_records
+    WHERE date = ?
+    GROUP BY machine_or_line
+    ORDER BY actual DESC
+    """, (selected_date,))
+    machine_performance = [dict(row) for row in cursor.fetchall()]
+    for m in machine_performance:
+        m["achievement_pct"] = round((m["actual"] / m["target"] * 100), 1) if m["target"] > 0 else 0
+
+    best_machine = machine_performance[0] if machine_performance else None
+    lowest_machine = machine_performance[-1] if machine_performance else None
+
+    # Total registered machines & stopped count
+    total_registered_machines = total_nc_machines + total_tandem_lines
+    running_machines = active_nc_machines + active_tandem_lines
+    stopped_machines = max(0, total_registered_machines - running_machines)
+
     conn.close()
+
+    # 12 Essential KPI Cards directly mapped
+    kpi_cards = {
+        "today_total_production": day_row["day_actual"],
+        "nc_production": nc_summary["actual"],
+        "tandem_production": tandem_summary["actual"],
+        "total_production_target": total_target,
+        "actual_production": total_actual,
+        "achievement_pct": achievement_pct,
+        "total_manpower": total_employees,
+        "present_employees": employees_present,
+        "absent_employees": employees_absent,
+        "running_machines": running_machines,
+        "stopped_machines": stopped_machines,
+        "total_downtime": total_downtime
+    }
 
     return jsonify({
         "selected_date": selected_date,
@@ -481,6 +558,12 @@ def get_dashboard_kpis():
         "total_nc_machines": total_nc_machines,
         "active_tandem_lines": active_tandem_lines,
         "total_tandem_lines": total_tandem_lines,
+        "kpi_cards": kpi_cards,
+        "weekly_trend": weekly_trend,
+        "monthly_trend": monthly_trend,
+        "machine_performance": machine_performance,
+        "best_machine": best_machine,
+        "lowest_machine": lowest_machine,
         "shift_production": {
             "target": total_target,
             "actual": total_actual,
@@ -2124,6 +2207,689 @@ def delete_single_production_record(record_id):
     conn.commit()
     conn.close()
     return jsonify({"success": True, "message": f"Production record #{record_id} deleted."})
+
+# -------------------------------------------------------------
+# PRODUCTION RECORDS CRUD (STANDARD PRODUCTION & ADVANCED ENTRY)
+# -------------------------------------------------------------
+@app.route("/api/production/records", methods=["GET", "POST"])
+def manage_production_records():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        prod_type = data.get("production_type", "NC")
+        machine_or_line = data.get("machine_or_line", "").strip()
+        date_val = data.get("date", date.today().isoformat()).strip()
+        shift = data.get("shift", "Shift A").strip()
+        hour_interval = data.get("hour_interval", "Full Shift").strip()
+        operator_name = data.get("operator_name", "").strip()
+        supervisor_name = data.get("supervisor_name", "").strip()
+        tonnage = float(data.get("tonnage", 0))
+        target_qty = int(data.get("target_qty", 0))
+        actual_qty = int(data.get("actual_qty", 0))
+        good_qty = int(data.get("good_qty", actual_qty))
+        rejected_qty = int(data.get("rejected_qty", 0))
+        downtime_minutes = int(data.get("downtime_minutes", 0))
+        downtime_reason = data.get("downtime_reason", "").strip()
+        remarks = data.get("remarks", "").strip()
+        tool_number = data.get("tool_number", "").strip()
+
+        if not machine_or_line:
+            conn.close()
+            return jsonify({"error": "Machine or line identifier is required"}), 400
+
+        cursor.execute("""
+        INSERT INTO production_records (
+            production_type, machine_or_line, date, shift, hour_interval,
+            operator_name, supervisor_name, tonnage, target_qty, actual_qty,
+            good_qty, rejected_qty, downtime_minutes, downtime_reason, remarks, tool_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(machine_or_line, date, shift, hour_interval) DO UPDATE SET
+            operator_name = excluded.operator_name,
+            supervisor_name = excluded.supervisor_name,
+            tonnage = excluded.tonnage,
+            target_qty = excluded.target_qty,
+            actual_qty = excluded.actual_qty,
+            good_qty = excluded.good_qty,
+            rejected_qty = excluded.rejected_qty,
+            downtime_minutes = excluded.downtime_minutes,
+            downtime_reason = excluded.downtime_reason,
+            remarks = excluded.remarks,
+            tool_number = excluded.tool_number
+        """, (
+            prod_type, machine_or_line, date_val, shift, hour_interval,
+            operator_name, supervisor_name, tonnage, target_qty, actual_qty,
+            good_qty, rejected_qty, downtime_minutes, downtime_reason, remarks, tool_number
+        ))
+        conn.commit()
+        record_id = cursor.lastrowid
+
+        # Update machine status
+        try:
+            m_status = 'Breakdown' if downtime_minutes > 60 else ('Running' if actual_qty > 0 else 'Idle')
+            cursor.execute("UPDATE machines SET status = ?, assigned_operator = ? WHERE machine_number = ?", 
+                           (m_status, operator_name, machine_or_line))
+            conn.commit()
+        except Exception:
+            pass
+
+        # Log Activity
+        try:
+            cursor.execute("""
+            INSERT INTO activity_logs (user_name, action, record_type, record_id, details)
+            VALUES (?, 'CREATE', 'Production Record', ?, ?)
+            """, (supervisor_name or "Supervisor", str(record_id), f"{machine_or_line}: {actual_qty}/{target_qty} pcs on {date_val} ({shift})"))
+            conn.commit()
+        except Exception:
+            pass
+
+        conn.close()
+        return jsonify({"success": True, "message": "Production record saved successfully!", "id": record_id})
+
+    # GET: Filtered production history
+    selected_date = request.args.get("date")
+    selected_shift = request.args.get("shift")
+    selected_machine = request.args.get("machine")
+    selected_type = request.args.get("type")
+    limit = int(request.args.get("limit", 200))
+
+    query = "SELECT * FROM production_records WHERE 1=1"
+    params = []
+    if selected_date:
+        query += " AND date = ?"
+        params.append(selected_date)
+    if selected_shift:
+        query += " AND shift = ?"
+        params.append(selected_shift)
+    if selected_machine:
+        query += " AND machine_or_line = ?"
+        params.append(selected_machine)
+    if selected_type:
+        query += " AND production_type = ?"
+        params.append(selected_type)
+
+    query += " ORDER BY date DESC, shift ASC, id DESC LIMIT ?"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    records = [dict(row) for row in cursor.fetchall()]
+    for r in records:
+        tgt = r.get("target_qty", 0)
+        act = r.get("actual_qty", 0)
+        r["achievement_pct"] = round((act / tgt * 100), 1) if tgt > 0 else 0
+        r["remaining_qty"] = max(0, tgt - act)
+
+    conn.close()
+    return jsonify({"success": True, "records": records, "count": len(records)})
+
+@app.route("/api/production/records/<int:record_id>", methods=["PUT"])
+def update_production_record(record_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    data = request.get_json(silent=True) or {}
+    
+    cursor.execute("SELECT * FROM production_records WHERE id = ?", (record_id,))
+    existing = cursor.fetchone()
+    if not existing:
+        conn.close()
+        return jsonify({"error": "Production record not found"}), 404
+
+    target_qty = int(data.get("target_qty", existing["target_qty"]))
+    actual_qty = int(data.get("actual_qty", existing["actual_qty"]))
+    good_qty = int(data.get("good_qty", existing["good_qty"]))
+    rejected_qty = int(data.get("rejected_qty", existing["rejected_qty"]))
+    downtime_minutes = int(data.get("downtime_minutes", existing["downtime_minutes"]))
+    downtime_reason = data.get("downtime_reason", existing["downtime_reason"])
+    remarks = data.get("remarks", existing["remarks"])
+    operator_name = data.get("operator_name", existing["operator_name"])
+    supervisor_name = data.get("supervisor_name", existing["supervisor_name"])
+    tool_number = data.get("tool_number", existing["tool_number"])
+
+    cursor.execute("""
+    UPDATE production_records SET
+        target_qty = ?, actual_qty = ?, good_qty = ?, rejected_qty = ?,
+        downtime_minutes = ?, downtime_reason = ?, remarks = ?,
+        operator_name = ?, supervisor_name = ?, tool_number = ?
+    WHERE id = ?
+    """, (target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes, downtime_reason, remarks, operator_name, supervisor_name, tool_number, record_id))
+    conn.commit()
+
+    # Log Activity
+    try:
+        cursor.execute("""
+        INSERT INTO activity_logs (user_name, action, record_type, record_id, details)
+        VALUES (?, 'UPDATE', 'Production Record', ?, ?)
+        """, (supervisor_name or "Supervisor", str(record_id), f"Updated #{record_id}: {actual_qty}/{target_qty} units"))
+        conn.commit()
+    except Exception:
+        pass
+
+    conn.close()
+    return jsonify({"success": True, "message": f"Production record #{record_id} updated successfully."})
+
+# -------------------------------------------------------------
+# ACTIVITY LOG AUDIT TRAIL
+# -------------------------------------------------------------
+@app.route("/api/activity-logs", methods=["GET", "POST"])
+def manage_activity_logs():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        user_name = data.get("user_name", "System")
+        action = data.get("action", "UPDATE")
+        record_type = data.get("record_type", "General")
+        record_id = str(data.get("record_id", ""))
+        details = data.get("details", "")
+        cursor.execute("""
+        INSERT INTO activity_logs (user_name, action, record_type, record_id, details)
+        VALUES (?, ?, ?, ?, ?)
+        """, (user_name, action, record_type, record_id, details))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+
+    cursor.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 100")
+    logs = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "logs": logs})
+
+# -------------------------------------------------------------
+# MACHINE DOWNTIME TRACKING
+# -------------------------------------------------------------
+@app.route("/api/machine-downtime", methods=["GET", "POST"])
+def manage_machine_downtime():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        m_num = data.get("machine_number", "").strip()
+        b_start = data.get("breakdown_start", datetime.now().strftime("%Y-%m-%d %H:%M")).strip()
+        b_end = data.get("breakdown_end", "").strip() or None
+        reason = data.get("breakdown_reason", "Unscheduled breakdown").strip()
+        minutes = int(data.get("total_downtime_minutes", 0))
+        remarks = data.get("remarks", "").strip()
+        reported_by = data.get("reported_by", "Supervisor").strip()
+        status = data.get("status", "Open").strip()
+
+        cursor.execute("""
+        INSERT INTO machine_downtime (
+            machine_number, breakdown_start, breakdown_end,
+            breakdown_reason, total_downtime_minutes, remarks, reported_by, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (m_num, b_start, b_end, reason, minutes, remarks, reported_by, status))
+        conn.commit()
+        log_id = cursor.lastrowid
+
+        # Update machine status
+        m_state = "Breakdown" if status != "Resolved" else "Idle"
+        cursor.execute("UPDATE machines SET status = ? WHERE machine_number = ?", (m_state, m_num))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": f"Downtime logged for {m_num}", "id": log_id})
+
+    m_filter = request.args.get("machine")
+    query = "SELECT * FROM machine_downtime WHERE 1=1"
+    params = []
+    if m_filter:
+        query += " AND machine_number = ?"
+        params.append(m_filter)
+    query += " ORDER BY id DESC LIMIT 100"
+    cursor.execute(query, params)
+    downtimes = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "downtimes": downtimes})
+
+@app.route("/api/machine-downtime/<int:id>/resolve", methods=["PUT"])
+def resolve_machine_downtime(id):
+    conn = get_db()
+    cursor = conn.cursor()
+    data = request.get_json(silent=True) or {}
+    b_end = data.get("breakdown_end", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    minutes = int(data.get("total_downtime_minutes", 0))
+    cursor.execute("""
+    UPDATE machine_downtime SET status = 'Resolved', breakdown_end = ?, total_downtime_minutes = ?
+    WHERE id = ?
+    """, (b_end, minutes, id))
+    cursor.execute("SELECT machine_number FROM machine_downtime WHERE id = ?", (id,))
+    row = cursor.fetchone()
+    if row:
+        cursor.execute("UPDATE machines SET status = 'Idle' WHERE machine_number = ?", (row["machine_number"],))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "message": "Downtime resolved."})
+
+# -------------------------------------------------------------
+# DYNAMIC IN-APP NOTIFICATIONS
+# Evaluates live database state to generate accurate factory alerts
+# -------------------------------------------------------------
+@app.route("/api/notifications", methods=["GET"])
+def get_live_notifications():
+    conn = get_db()
+    cursor = conn.cursor()
+    today_str = date.today().isoformat()
+    curr_shift = get_current_shift()
+    notifications = []
+
+    # 1. Machine Breakdowns (High Priority - Red)
+    cursor.execute("SELECT machine_number, machine_type, status, maintenance_notes FROM machines WHERE status = 'Breakdown'")
+    for m in cursor.fetchall():
+        notifications.append({
+            "id": f"bd-{m['machine_number']}",
+            "priority": "HIGH",
+            "type": "error",
+            "title": f"Machine Breakdown: {m['machine_number']}",
+            "message": f"{m['machine_type']} unit {m['machine_number']} is currently in Breakdown status. Urgent maintenance required.",
+            "time": "Active",
+            "category": "Maintenance",
+            "link": "machines"
+        })
+
+    # 2. Production Below Target (Medium Priority - Orange)
+    cursor.execute("""
+    SELECT machine_or_line, target_qty, actual_qty, hour_interval
+    FROM production_records
+    WHERE date = ? AND shift = ? AND actual_qty < (target_qty * 0.75) AND target_qty > 0
+    ORDER BY id DESC LIMIT 3
+    """, (today_str, curr_shift))
+    for p in cursor.fetchall():
+        notifications.append({
+            "id": f"low-{p['machine_or_line']}-{p['hour_interval']}",
+            "priority": "MEDIUM",
+            "type": "warning",
+            "title": f"Output Below Target: {p['machine_or_line']}",
+            "message": f"{p['machine_or_line']} produced {p['actual_qty']} vs target {p['target_qty']} in {p['hour_interval']}.",
+            "time": "Recent",
+            "category": "Production",
+            "link": "hourly-production"
+        })
+
+    # 3. Pending Shift Handovers (Medium Priority - Orange)
+    cursor.execute("""
+    SELECT id, outgoing_shift, incoming_shift, responsible_person, completion_status
+    FROM shift_handovers WHERE completion_status != 'Resolved'
+    ORDER BY id DESC LIMIT 2
+    """)
+    for h in cursor.fetchall():
+        notifications.append({
+            "id": f"ho-{h['id']}",
+            "priority": "MEDIUM",
+            "type": "warning",
+            "title": f"Pending Handover: {h['outgoing_shift']} → {h['incoming_shift']}",
+            "message": f"Action items unresolved by {h['responsible_person']}.",
+            "time": "Pending",
+            "category": "Handover",
+            "link": "handovers"
+        })
+
+    # 4. Attendance Check (Info - Blue)
+    cursor.execute("SELECT COUNT(*) FROM attendance WHERE date = ? AND shift = ?", (today_str, curr_shift))
+    att_count = cursor.fetchone()[0]
+    if att_count == 0:
+        notifications.append({
+            "id": "att-pending",
+            "priority": "INFO",
+            "type": "info",
+            "title": f"Attendance Pending: {curr_shift}",
+            "message": f"Daily shift muster has not been recorded yet for {curr_shift} on {today_str}.",
+            "time": "Today",
+            "category": "Attendance",
+            "link": "attendance"
+        })
+
+    # 5. Production Target Achieved (Success - Green)
+    cursor.execute("""
+    SELECT machine_or_line, actual_qty, target_qty
+    FROM production_records
+    WHERE date = ? AND shift = ? AND actual_qty >= target_qty AND target_qty > 0
+    ORDER BY actual_qty DESC LIMIT 2
+    """, (today_str, curr_shift))
+    for ok in cursor.fetchall():
+        notifications.append({
+            "id": f"achieve-{ok['machine_or_line']}",
+            "priority": "SUCCESS",
+            "type": "success",
+            "title": f"Target Met: {ok['machine_or_line']}",
+            "message": f"Exceeded goal with {ok['actual_qty']} units (Target: {ok['target_qty']}).",
+            "time": "Shift",
+            "category": "Production",
+            "link": "production-dashboard"
+        })
+
+    conn.close()
+    return jsonify({"success": True, "notifications": notifications, "count": len(notifications)})
+
+# -------------------------------------------------------------
+# PRODUCTION ANALYTICS (EXECUTIVE FACTORY INTELLIGENCE)
+# -------------------------------------------------------------
+@app.route("/api/analytics", methods=["GET"])
+def get_production_analytics():
+    selected_date = request.args.get("date", date.today().isoformat())
+    selected_shift = request.args.get("shift", get_current_shift())
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Shift totals
+    cursor.execute("""
+    SELECT 
+        COALESCE(SUM(target_qty), 0) as target,
+        COALESCE(SUM(actual_qty), 0) as actual,
+        COALESCE(SUM(good_qty), 0) as good,
+        COALESCE(SUM(rejected_qty), 0) as rejected,
+        COALESCE(SUM(downtime_minutes), 0) as downtime,
+        COUNT(DISTINCT machine_or_line) as active_machines,
+        COUNT(*) as total_entries
+    FROM production_records
+    WHERE date = ? AND shift = ?
+    """, (selected_date, selected_shift))
+    shift_tot = dict(cursor.fetchone())
+
+    # Day totals
+    cursor.execute("""
+    SELECT 
+        COALESCE(SUM(target_qty), 0) as target,
+        COALESCE(SUM(actual_qty), 0) as actual,
+        COALESCE(SUM(good_qty), 0) as good,
+        COALESCE(SUM(rejected_qty), 0) as rejected,
+        COALESCE(SUM(downtime_minutes), 0) as downtime
+    FROM production_records
+    WHERE date = ?
+    """, (selected_date,))
+    day_tot = dict(cursor.fetchone())
+
+    # NC vs Tandem
+    cursor.execute("""
+    SELECT 
+        production_type,
+        COALESCE(SUM(target_qty), 0) as target,
+        COALESCE(SUM(actual_qty), 0) as actual,
+        COALESCE(SUM(good_qty), 0) as good,
+        COALESCE(SUM(rejected_qty), 0) as rejected,
+        COALESCE(SUM(downtime_minutes), 0) as downtime
+    FROM production_records
+    WHERE date = ? AND shift = ?
+    GROUP BY production_type
+    """, (selected_date, selected_shift))
+    nc_tan_rows = {row["production_type"]: dict(row) for row in cursor.fetchall()}
+
+    # Averages
+    cursor.execute("""
+    SELECT AVG(actual_qty) as avg_hourly
+    FROM production_records
+    WHERE date = ? AND shift = ? AND actual_qty > 0
+    """, (selected_date, selected_shift))
+    avg_hr = round(cursor.fetchone()[0] or 0, 1)
+
+    # Machine rankings
+    cursor.execute("""
+    SELECT machine_or_line, production_type,
+           SUM(target_qty) as target, SUM(actual_qty) as actual,
+           SUM(good_qty) as good, SUM(rejected_qty) as rejected,
+           SUM(downtime_minutes) as downtime,
+           ROUND(SUM(actual_qty) * 100.0 / NULLIF(SUM(target_qty), 0), 1) as achievement_pct
+    FROM production_records
+    WHERE date = ?
+    GROUP BY machine_or_line
+    ORDER BY actual DESC
+    """, (selected_date,))
+    rankings = [dict(row) for row in cursor.fetchall()]
+
+    # Best shift
+    cursor.execute("""
+    SELECT shift, SUM(actual_qty) as actual, SUM(target_qty) as target
+    FROM production_records
+    WHERE date = ?
+    GROUP BY shift
+    ORDER BY actual DESC
+    """, (selected_date,))
+    shift_rankings = [dict(row) for row in cursor.fetchall()]
+
+    # Weekly trend (last 7 days)
+    weekly_trend = []
+    try:
+        cur_d = datetime.strptime(selected_date, "%Y-%m-%d").date()
+    except Exception:
+        cur_d = date.today()
+    for i in range(6, -1, -1):
+        d_str = (cur_d - timedelta(days=i)).isoformat()
+        cursor.execute("SELECT COALESCE(SUM(target_qty), 0), COALESCE(SUM(actual_qty), 0) FROM production_records WHERE date = ?", (d_str,))
+        w_row = cursor.fetchone()
+        weekly_trend.append({"date": d_str, "day": (cur_d - timedelta(days=i)).strftime("%a"), "target": w_row[0], "actual": w_row[1]})
+
+    # Monthly trend (last 30 days)
+    monthly_trend = []
+    for i in range(29, -1, -1):
+        d_str = (cur_d - timedelta(days=i)).isoformat()
+        cursor.execute("SELECT COALESCE(SUM(target_qty), 0), COALESCE(SUM(actual_qty), 0) FROM production_records WHERE date = ?", (d_str,))
+        m_row = cursor.fetchone()
+        monthly_trend.append({"date": d_str, "day": d_str[8:], "target": m_row[0], "actual": m_row[1]})
+
+    # Production loss analysis by downtime reason
+    cursor.execute("""
+    SELECT downtime_reason, COUNT(*) as occurrences, SUM(downtime_minutes) as total_minutes
+    FROM production_records
+    WHERE date = ? AND downtime_minutes > 0 AND downtime_reason != ''
+    GROUP BY downtime_reason
+    ORDER BY total_minutes DESC
+    """, (selected_date,))
+    loss_analysis = [dict(row) for row in cursor.fetchall()]
+
+    conn.close()
+
+    tgt = shift_tot.get("target", 0)
+    act = shift_tot.get("actual", 0)
+    efficiency = round((act / tgt * 100), 1) if tgt > 0 else 0
+
+    return jsonify({
+        "selected_date": selected_date,
+        "selected_shift": selected_shift,
+        "efficiency_pct": efficiency,
+        "shift_totals": shift_tot,
+        "day_totals": day_tot,
+        "nc_data": nc_tan_rows.get("NC", {"target": 0, "actual": 0, "good": 0, "rejected": 0, "downtime": 0}),
+        "tandem_data": nc_tan_rows.get("Tandem", {"target": 0, "actual": 0, "good": 0, "rejected": 0, "downtime": 0}),
+        "avg_hourly_production": avg_hr,
+        "machine_rankings": rankings,
+        "best_machine": rankings[0] if rankings else None,
+        "lowest_machine": rankings[-1] if rankings else None,
+        "best_shift": shift_rankings[0] if shift_rankings else None,
+        "shift_rankings": shift_rankings,
+        "weekly_trend": weekly_trend,
+        "monthly_trend": monthly_trend,
+        "loss_analysis": loss_analysis
+    })
+
+# -------------------------------------------------------------
+# 11 PROFESSIONAL FACTORY REPORTS DATA API
+# -------------------------------------------------------------
+@app.route("/api/reports/data", methods=["GET"])
+def get_reports_data():
+    report_type = request.args.get("report_type", "daily_production").lower()
+    from_date = request.args.get("from_date", date.today().isoformat())
+    to_date = request.args.get("to_date", date.today().isoformat())
+    shift = request.args.get("shift", "")
+    machine = request.args.get("machine", "")
+    prod_type = request.args.get("type", "")
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    base_where = " WHERE date BETWEEN ? AND ?"
+    params = [from_date, to_date]
+    if shift:
+        base_where += " AND shift = ?"
+        params.append(shift)
+    if machine:
+        base_where += " AND machine_or_line = ?"
+        params.append(machine)
+    if prod_type:
+        base_where += " AND production_type = ?"
+        params.append(prod_type)
+
+    rows = []
+    columns = []
+
+    if report_type == "daily_production":
+        cursor.execute(f"""
+        SELECT date, shift, production_type, machine_or_line, tool_number, operator_name,
+               target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes,
+               ROUND(actual_qty * 100.0 / NULLIF(target_qty, 0), 1) as achievement_pct
+        FROM production_records {base_where}
+        ORDER BY date DESC, shift ASC, machine_or_line ASC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "production_type", "machine_or_line", "tool_number", "operator_name", "target_qty", "actual_qty", "good_qty", "rejected_qty", "downtime_minutes", "achievement_pct"]
+
+    elif report_type == "shift_wise":
+        cursor.execute(f"""
+        SELECT date, shift, production_type,
+               COUNT(DISTINCT machine_or_line) as machines_run,
+               SUM(target_qty) as total_target,
+               SUM(actual_qty) as total_actual,
+               SUM(good_qty) as total_good,
+               SUM(rejected_qty) as total_rejected,
+               SUM(downtime_minutes) as total_downtime,
+               ROUND(SUM(actual_qty) * 100.0 / NULLIF(SUM(target_qty), 0), 1) as achievement_pct
+        FROM production_records {base_where}
+        GROUP BY date, shift, production_type
+        ORDER BY date DESC, shift ASC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "production_type", "machines_run", "total_target", "total_actual", "total_good", "total_rejected", "total_downtime", "achievement_pct"]
+
+    elif report_type == "hourly_production":
+        cursor.execute(f"""
+        SELECT date, shift, hour_interval, machine_or_line, tool_number, operator_name,
+               target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes, downtime_reason,
+               ROUND(actual_qty * 100.0 / NULLIF(target_qty, 0), 1) as achievement_pct
+        FROM production_records {base_where}
+        ORDER BY date DESC, shift ASC, hour_interval ASC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "hour_interval", "machine_or_line", "tool_number", "operator_name", "target_qty", "actual_qty", "good_qty", "rejected_qty", "downtime_minutes", "downtime_reason", "achievement_pct"]
+
+    elif report_type == "nc_production":
+        cursor.execute(f"""
+        SELECT date, shift, machine_or_line as nc_machine, tool_number, operator_name,
+               target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes,
+               ROUND(actual_qty * 100.0 / NULLIF(target_qty, 0), 1) as achievement_pct
+        FROM production_records {base_where} AND production_type = 'NC'
+        ORDER BY date DESC, machine_or_line ASC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "nc_machine", "tool_number", "operator_name", "target_qty", "actual_qty", "good_qty", "rejected_qty", "downtime_minutes", "achievement_pct"]
+
+    elif report_type == "tandem_production":
+        cursor.execute(f"""
+        SELECT date, shift, machine_or_line as tandem_line, tool_number, operator_name,
+               target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes,
+               ROUND(actual_qty * 100.0 / NULLIF(target_qty, 0), 1) as achievement_pct
+        FROM production_records {base_where} AND production_type = 'Tandem'
+        ORDER BY date DESC, machine_or_line ASC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "tandem_line", "tool_number", "operator_name", "target_qty", "actual_qty", "good_qty", "rejected_qty", "downtime_minutes", "achievement_pct"]
+
+    elif report_type == "machine_wise":
+        cursor.execute(f"""
+        SELECT machine_or_line, production_type,
+               COUNT(DISTINCT date) as days_operated,
+               SUM(target_qty) as total_target,
+               SUM(actual_qty) as total_actual,
+               SUM(good_qty) as total_good,
+               SUM(rejected_qty) as total_rejected,
+               SUM(downtime_minutes) as total_downtime,
+               ROUND(SUM(actual_qty) * 100.0 / NULLIF(SUM(target_qty), 0), 1) as achievement_pct
+        FROM production_records {base_where}
+        GROUP BY machine_or_line
+        ORDER BY total_actual DESC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["machine_or_line", "production_type", "days_operated", "total_target", "total_actual", "total_good", "total_rejected", "total_downtime", "achievement_pct"]
+
+    elif report_type == "operator_wise":
+        cursor.execute(f"""
+        SELECT operator_name,
+               COUNT(DISTINCT date) as days_worked,
+               COUNT(DISTINCT machine_or_line) as machines_operated,
+               SUM(target_qty) as total_target,
+               SUM(actual_qty) as total_actual,
+               SUM(good_qty) as total_good,
+               SUM(rejected_qty) as total_rejected,
+               ROUND(SUM(actual_qty) * 100.0 / NULLIF(SUM(target_qty), 0), 1) as achievement_pct
+        FROM production_records {base_where} AND operator_name != ''
+        GROUP BY operator_name
+        ORDER BY total_actual DESC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["operator_name", "days_worked", "machines_operated", "total_target", "total_actual", "total_good", "total_rejected", "achievement_pct"]
+
+    elif report_type == "target_achievement":
+        cursor.execute(f"""
+        SELECT date, shift, machine_or_line, target_qty, actual_qty,
+               (actual_qty - target_qty) as variance,
+               ROUND(actual_qty * 100.0 / NULLIF(target_qty, 0), 1) as achievement_pct,
+               CASE 
+                   WHEN actual_qty >= target_qty THEN 'Target Met'
+                   WHEN actual_qty >= target_qty * 0.85 THEN 'Near Target'
+                   ELSE 'Below Target'
+               END as status
+        FROM production_records {base_where}
+        ORDER BY achievement_pct DESC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "machine_or_line", "target_qty", "actual_qty", "variance", "achievement_pct", "status"]
+
+    elif report_type == "downtime":
+        cursor.execute(f"""
+        SELECT date, shift, machine_or_line, downtime_minutes, downtime_reason, remarks
+        FROM production_records {base_where} AND downtime_minutes > 0
+        ORDER BY downtime_minutes DESC
+        """, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["date", "shift", "machine_or_line", "downtime_minutes", "downtime_reason", "remarks"]
+
+    elif report_type == "manpower":
+        cursor.execute("""
+        SELECT e.emp_id, e.name, e.department, e.designation, e.shift, e.assigned_machine, e.status,
+               COALESCE(a.status, 'Not Marked') as today_attendance,
+               a.check_in_time, a.check_out_time
+        FROM employees e
+        LEFT JOIN attendance a ON e.emp_id = a.emp_id AND a.date = ?
+        ORDER BY e.emp_id ASC
+        """, (to_date,))
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["emp_id", "name", "department", "designation", "shift", "assigned_machine", "status", "today_attendance", "check_in_time", "check_out_time"]
+
+    elif report_type == "monthly_production":
+        cursor.execute("""
+        SELECT substr(date, 1, 7) as month,
+               COUNT(DISTINCT date) as days_in_month,
+               SUM(target_qty) as total_target,
+               SUM(actual_qty) as total_actual,
+               SUM(good_qty) as total_good,
+               SUM(rejected_qty) as total_rejected,
+               SUM(downtime_minutes) as total_downtime,
+               ROUND(SUM(actual_qty) * 100.0 / NULLIF(SUM(target_qty), 0), 1) as achievement_pct
+        FROM production_records
+        GROUP BY substr(date, 1, 7)
+        ORDER BY month DESC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        columns = ["month", "days_in_month", "total_target", "total_actual", "total_good", "total_rejected", "total_downtime", "achievement_pct"]
+
+    conn.close()
+    return jsonify({
+        "success": True,
+        "report_type": report_type,
+        "from_date": from_date,
+        "to_date": to_date,
+        "columns": columns,
+        "rows": rows,
+        "count": len(rows)
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

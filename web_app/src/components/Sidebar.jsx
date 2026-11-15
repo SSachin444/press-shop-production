@@ -49,6 +49,7 @@ export default function Sidebar({
     // ── NEW PRODUCTION PAGES ──
     { id: 'standard-production', label: 'Production Workspace', icon: SplitSquareHorizontal, section: 'Production Pages', badge: 'P1+P2', badgeBg: '#1e40af', badgeColor: '#fff' },
     { id: 'production-dashboard', label: 'Production Dashboard', icon: BarChart3, section: 'Production Pages', badge: 'P3', badgeBg: '#059669', badgeColor: '#fff' },
+    { id: 'analytics', label: 'Plant Analytics & Trends', icon: TrendingUp, section: 'Production Pages', badge: 'KPI', badgeBg: '#7c3aed', badgeColor: '#fff' },
 
     // ── SHOPFLOOR TOOLS ──
     { id: 'hourly-production', label: '⚡ Hourly Production Entry', icon: Timer, section: 'Shopfloor Entry' },
@@ -59,10 +60,24 @@ export default function Sidebar({
     { id: 'three-shifts', label: '3-Shift Comparison', icon: Repeat, section: 'Shopfloor Entry' },
     { id: 'production-hub', label: 'Production Hub', icon: Factory, section: 'Shopfloor Entry' },
 
-    { id: 'machines', label: 'Machine Directory', icon: Cpu, section: 'Plant Assets & System' },
+    { id: 'machines', label: 'Machine Directory & QR', icon: Cpu, section: 'Plant Assets & System' },
     { id: 'handovers', label: 'Shift Handover Log', icon: MessageSquare, section: 'Plant Assets & System' },
+    { id: 'activity-logs', label: 'Audit Activity Log', icon: ShieldCheck, section: 'Plant Assets & System' },
     { id: 'settings', label: 'System Settings', icon: Settings, section: 'Plant Assets & System' },
   ];
+
+  const userRole = (currentUser?.role || 'Supervisor').toLowerCase();
+  
+  const rolePermissions = {
+    admin: ['dashboard', 'employees', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'handovers', 'activity-logs', 'settings'],
+    'production manager': ['dashboard', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'activity-logs'],
+    supervisor: ['dashboard', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'machines', 'handovers'],
+    management: ['dashboard', 'reports', 'production-dashboard', 'analytics', 'three-shifts', 'cell-status', 'nc-production', 'tandem-production', 'activity-logs'],
+    operator: ['dashboard', 'hourly-production', 'cell-status', 'plans', 'machines']
+  };
+
+  const allowedIds = rolePermissions[userRole] || rolePermissions.supervisor;
+  const filteredNavItems = navItems.filter(item => allowedIds.includes(item.id));
 
   let currentSection = '';
 
@@ -138,7 +153,7 @@ export default function Sidebar({
 
         {/* Navigation List */}
         <div className="sidebar-nav">
-          {navItems.map((item) => {
+          {filteredNavItems.map((item) => {
             const showSection = item.section !== currentSection;
             if (showSection) currentSection = item.section;
 

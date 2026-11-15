@@ -24,40 +24,64 @@ export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
 
   const roles = [
     {
+      id: 'Admin',
+      title: 'Admin',
+      subtitle: 'Complete Master Control',
+      description: 'Manage users, employees, machines, production, settings & audit logs',
+      icon: ShieldCheck,
+      gradient: 'linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%)',
+      borderActive: '#1e40af',
+      badge: 'Full Access',
+      badgeColor: '#eff6ff',
+      badgeText: '#1e40af'
+    },
+    {
+      id: 'Production Manager',
+      title: 'Production Manager',
+      subtitle: 'Plant Operations Lead',
+      description: 'Production oversight, line management, executive dashboard & reports',
+      icon: UserCheck,
+      gradient: 'linear-gradient(135deg, #0f766e 0%, #0d9488 100%)',
+      borderActive: '#0f766e',
+      badge: 'Plant Lead',
+      badgeColor: '#f0fdfa',
+      badgeText: '#0f766e'
+    },
+    {
       id: 'Supervisor',
       title: 'Supervisor',
       subtitle: 'Shift In-Charge & Line Lead',
-      description: 'Hourly Logging, Tool Plan Management, Shift Reports',
+      description: 'Standard & hourly entry, shift handovers, attendance & shift logs',
       icon: UserCheck,
       gradient: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
       borderActive: '#10b981',
-      badge: 'Production Lead',
+      badge: 'Shift Lead',
       badgeColor: '#ecfdf5',
       badgeText: '#047857'
     },
     {
-      id: 'Admin',
-      title: 'Admin',
-      subtitle: 'Plant Management & Systems',
-      description: 'Full Master Control, Settings, Employee & Machine Config',
-      icon: ShieldCheck,
+      id: 'Management',
+      title: 'Management',
+      subtitle: 'Executive Leadership',
+      description: 'Strategic plant analytics, real-time KPIs, performance trends & reports',
+      icon: Users,
       gradient: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
       borderActive: '#6366f1',
-      badge: 'Full Access',
+      badge: 'Executive',
       badgeColor: '#eef2ff',
       badgeText: '#4338ca'
     },
     {
-      id: 'Others',
-      title: 'Others',
-      subtitle: 'Operator / Maintenance / QC',
-      description: 'Shopfloor View, Machine Status, Downtime Tracking',
-      icon: Users,
-      gradient: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
-      borderActive: '#0ea5e9',
-      badge: 'Standard Access',
+      id: 'Operator',
+      title: 'Operator',
+      subtitle: 'Shopfloor Line Operator',
+      description: 'Machine status inspection, permitted output logging & tool plans',
+      icon: Cpu,
+      gradient: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+      borderActive: '#0284c7',
+      badge: 'Shopfloor',
       badgeColor: '#f0f9ff',
-      badgeText: '#0369a1'
+      badgeText: '#0284c7'
     }
   ];
 
@@ -68,9 +92,11 @@ export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
       setError(null);
 
       const defaultNames = {
-        Supervisor: 'Shift Supervisor',
         Admin: 'PHA Administrator',
-        Others: 'Line Operator'
+        'Production Manager': 'Production Manager',
+        Supervisor: 'Shift Supervisor',
+        Management: 'Plant Director',
+        Operator: 'Line Operator'
       };
 
       const finalName = operatorName.trim() || defaultNames[selectedRole] || selectedRole;
@@ -78,12 +104,12 @@ export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
       // Call passwordless quick login
       const res = await api.login({
         role: selectedRole,
-        username: selectedRole.toLowerCase(),
+        username: selectedRole.toLowerCase().replace(/\s+/g, '_'),
         full_name: finalName
       });
 
       const user = res.user || {
-        username: selectedRole.toLowerCase(),
+        username: selectedRole.toLowerCase().replace(/\s+/g, '_'),
         full_name: finalName,
         role: selectedRole,
         department: selectedRole === 'Admin' ? 'Management' : 'Press Shop MFG-2'
@@ -98,7 +124,7 @@ export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
       console.warn('Backend login fallback to local session:', err);
       // Offline fallback: enable immediate local app access
       const user = {
-        username: selectedRole.toLowerCase(),
+        username: selectedRole.toLowerCase().replace(/\s+/g, '_'),
         full_name: operatorName.trim() || `${selectedRole} User`,
         role: selectedRole,
         department: selectedRole === 'Admin' ? 'Management' : 'Press Shop MFG-2'

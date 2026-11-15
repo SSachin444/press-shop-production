@@ -73,23 +73,10 @@ export default function EmployeeManagement() {
     try {
       setLoading(true);
       const res = await api.getEmployees();
-      if (res && res.employees && res.employees.length > 0) {
-        setEmployees(res.employees);
-      } else {
-        // Fallback default list
-        setEmployees([
-          { emp_id: 'A20755', name: 'SACHIN S', designation: 'Operator', department: 'NC Production', assigned_machine: 'NC-01', shift: 'Shift A', status: 'Present' },
-          { emp_id: 'A20556', name: 'SRIRAM', designation: 'Operator', department: 'NC Production', assigned_machine: 'NC-02', shift: 'Shift A', status: 'Present' },
-          { emp_id: 'A20821', name: 'KARTHIK M', designation: 'Helper', department: 'NC Production', assigned_machine: 'NC-03', shift: 'Shift B', status: 'Absent' },
-          { emp_id: 'A20112', name: 'MURUGAN R', designation: 'Line Lead', department: 'Tandem Line', assigned_machine: 'LP-1', shift: 'Shift A', status: 'Present' },
-          { emp_id: 'A20340', name: 'SURESH K', designation: 'Operator', department: 'Tandem Line', assigned_machine: 'LP-2', shift: 'Shift A', status: 'Present' },
-          { emp_id: 'A20455', name: 'PRAKASH M', designation: 'Operator', department: 'Tandem Line', assigned_machine: 'HP-1', shift: 'Shift B', status: 'Present' },
-          { emp_id: 'A20610', name: 'ANAND T', designation: 'Operator', department: 'Tandem Line', assigned_machine: 'HP-2', shift: 'Shift C', status: 'Present' },
-          { emp_id: 'A20722', name: 'RAJESH P', designation: 'Operator', department: 'Tandem Line', assigned_machine: 'HP-4', shift: 'Shift C', status: 'Absent' }
-        ]);
-      }
+      setEmployees(res?.employees || []);
     } catch (err) {
       console.warn('Load employees notice:', err);
+      setEmployees([]);
     } finally {
       setLoading(false);
     }
@@ -221,7 +208,7 @@ export default function EmployeeManagement() {
 
   const presentCount = employees.filter(e => e.status === 'Present' || e.status === 'Active').length;
   const absentCount = employees.length - presentCount;
-  const attendanceRate = employees.length > 0 ? ((presentCount / employees.length) * 100).toFixed(1) : '96.2';
+  const attendanceRate = employees.length > 0 ? ((presentCount / employees.length) * 100).toFixed(1) : '0';
 
   const machineOptions = [
     ...Array.from({ length: 16 }, (_, i) => `NC-${String(i+1).padStart(2, '0')}`),

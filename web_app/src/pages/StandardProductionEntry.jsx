@@ -1,84 +1,109 @@
 import React, { useState, useEffect } from 'react';
 import { 
+  Factory, 
   Layers, 
   GitBranch, 
   Plus, 
+  Edit, 
+  Trash2, 
+  Search, 
+  Filter, 
   Calendar, 
   Clock, 
-  CheckCircle, 
-  AlertTriangle, 
-  TrendingUp, 
-  Activity, 
+  User, 
+  CheckCircle2, 
+  AlertCircle, 
+  Check, 
   X, 
-  Search,
-  Filter,
   RefreshCw,
-  Cpu,
-  User,
-  CheckCircle2,
-  AlertCircle
+  TrendingUp,
+  Percent,
+  FileSpreadsheet,
+  AlertTriangle,
+  ArrowRight
 } from 'lucide-react';
 import { api } from '../api';
 
-export default function StandardProductionEntry({ selectedDate, selectedShift, onSync, onSwitchToHourly }) {
-  const [ncData, setNcData] = useState(null);
-  const [tandemData, setTandemData] = useState(null);
-  const [operatorsList, setOperatorsList] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [notification, setNotification] = useState(null);
+export default function StandardProductionEntry({ selectedDate, selectedShift = 'Shift A', onSync }) {
+  const activeDate = selectedDate || new Date().toISOString().split('T')[0];
 
-  // Filters
-  const [viewFilter, setViewFilter] = useState('ALL'); // 'ALL', 'NC', 'TANDEM'
-  const [statusFilter, setStatusFilter] = useState('ALL');
-  const [searchQuery, setSearchQuery] = useState('');
-
-  // Log Modal State
-  const [showModal, setShowModal] = useState(false);
-  const [modalForm, setModalForm] = useState({
-    production_type: 'NC',
+  // Form State
+  const [formData, setFormData] = useState({
+    date: activeDate,
+    shift: selectedShift,
+    production_type: 'NC', // 'NC' or 'Tandem'
     machine_or_line: 'NC-01',
-    date: selectedDate || new Date().toISOString().split('T')[0],
-    shift: selectedShift || 'Shift A',
-    hour_interval: 'Hour 1 (06:00-07:00)',
+    target_qty: 600,
+    actual_qty: 0,
+    good_qty: 0,
+    rejected_qty: 0,
     operator_name: '',
-    tonnage: 1000,
-    target_qty: 75,
-    actual_qty: 70,
-    good_qty: 68,
-    rejected_qty: 2,
+    supervisor_name: '',
+    remarks: '',
+    tool_number: '',
     downtime_minutes: 0,
-    downtime_reason: '',
-    remarks: ''
+    downtime_reason: ''
   });
 
+  const [editingId, setEditingId] = useState(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
+  // History & Options State
+  const [historyRecords, setHistoryRecords] = useState([]);
+  const [operatorsList, setOperatorsList] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [notification, setNotification] = useState(null);
+
+  // Filters for History Table
+  const [filterDate, setFilterDate] = useState(activeDate);
+  const [filterShift, setFilterShift] = useState('ALL');
+  const [filterMachine, setFilterMachine] = useState('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const ncMachines = Array.from({ length: 16 }, (_, i) => `NC-${String(i + 1).padStart(2, '0')}`);
+  const tandemLines = ['LP-1', 'LP-2', 'HP-1', 'HP-2', 'HP-3', 'HP-4'];
+
   useEffect(() => {
-    loadData();
+    // Sync initial supervisor from local storage
+    try {
+      const u = JSON.parse(localStorage.getItem('pha_user') || '{}');
+      if (u.full_name) {
+        setFormData(prev => ({ ...prev, supervisor_name: u.full_name }));
+      }
+    } catch (e) {}
+
     loadOperators();
-  }, [selectedDate, selectedShift]);
+    loadHistory();
+  }, [filterDate, filterShift, filterMachine]);
 
   const loadOperators = async () => {
     try {
       const res = await api.getEmployees();
       const emps = res.employees || [];
-      if (emps.length > 0) {
-        setOperatorsList(emps.map(e => ({ id: e.emp_id, name: e.name, display: `${e.name} (${e.emp_id})` })));
+      setOperatorsList(emps);
+      if (emps.length > 0 && !formData.operator_name) {
+        setFormData(prev => ({ ...prev, operator_name: emps[0].name }));
       }
     } catch (e) {
-      console.warn('Operator list fetch notice:', e);
+      console.warn('Operator list notice:', e);
+      setOperatorsList([]);
     }
   };
 
-  const loadData = async () => {
+  const loadHistory = async () => {
     try {
       setLoading(true);
-      const [ncRes, tanRes] = await Promise.all([
-        api.getNcProduction(selectedDate, selectedShift),
-        api.getTandemProduction(selectedDate, selectedShift)
-      ]);
-      setNcData(ncRes);
-      setTandemData(tanRes);
+      const params = {};
+      if (filterDate) params.date = filterDate;
+      if (filterShift !== 'ALL') params.shift = filterShift;
+      if (filterMachine !== 'ALL') params.machine = filterMachine;
+
+      const res = await api.getProductionRecords(params);
+      setHistoryRecords(res.records || []);
     } catch (err) {
-      showNotice('error', err.message || 'Failed to load production records');
+      console.warn('Failed to load history:', err);
+      setHistoryRecords([]);
     } finally {
       setLoading(false);
     }
@@ -89,83 +114,138 @@ export default function StandardProductionEntry({ selectedDate, selectedShift, o
     setTimeout(() => setNotification(null), 4000);
   };
 
-  const handleOpenModal = (m, type) => {
-    const isNC = type === 'NC';
-    const defaultTarget = isNC ? 75 : 125;
-    setModalForm({
+  // Live Calculations
+  const targetVal = Number(formData.target_qty) || 0;
+  const actualVal = Number(formData.actual_qty) || 0;
+  const achievementPct = targetVal > 0 ? Math.round((actualVal / targetVal) * 100) : 0;
+  const remainingQty = Math.max(0, targetVal - actualVal);
+
+  const handleTypeChange = (type) => {
+    const defaultMach = type === 'NC' ? 'NC-01' : 'LP-1';
+    const defaultTgt = type === 'NC' ? 600 : 800;
+    setFormData(prev => ({
+      ...prev,
       production_type: type,
-      machine_or_line: m.machine_number || m.line_id,
-      date: selectedDate,
-      shift: selectedShift,
-      hour_interval: 'Hour 1 (06:00-07:00)',
-      operator_name: m.operator || (operatorsList[0]?.display || ''),
-      tonnage: m.tonnage || (isNC ? 1000 : 1200),
-      target_qty: m.hourly_target || defaultTarget,
-      actual_qty: m.hourly_target || defaultTarget,
-      good_qty: m.hourly_target || defaultTarget,
-      rejected_qty: 0,
-      downtime_minutes: 0,
-      downtime_reason: '',
-      remarks: ''
-    });
-    setShowModal(true);
+      machine_or_line: defaultMach,
+      target_qty: defaultTgt
+    }));
   };
 
-  const handleSaveProduction = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!formData.machine_or_line) {
+      showNotice('error', 'Please select a Machine or Tandem Line');
+      return;
+    }
+
     try {
-      if (modalForm.production_type === 'NC') {
-        await api.saveNcProduction(modalForm);
+      setSubmitting(true);
+      const payload = {
+        ...formData,
+        hour_interval: 'Standard Shift Entry',
+        good_qty: Math.max(0, actualVal - (Number(formData.rejected_qty) || 0))
+      };
+
+      if (editingId) {
+        await api.updateProductionRecord(editingId, payload);
+        showNotice('success', `Record #${editingId} updated successfully.`);
+        setEditingId(null);
       } else {
-        await api.saveTandemProduction(modalForm);
+        await api.saveProductionRecord(payload);
+        showNotice('success', `Standard production record saved for ${formData.machine_or_line}.`);
       }
-      showNotice('success', `Saved output for ${modalForm.machine_or_line} [${modalForm.hour_interval}]`);
-      setShowModal(false);
-      loadData();
+
+      // Reset form actuals
+      setFormData(prev => ({
+        ...prev,
+        actual_qty: 0,
+        good_qty: 0,
+        rejected_qty: 0,
+        downtime_minutes: 0,
+        downtime_reason: '',
+        remarks: ''
+      }));
+
+      loadHistory();
       if (onSync) onSync();
     } catch (err) {
-      showNotice('error', err.message || 'Failed to record production');
+      showNotice('error', err.message || 'Failed to save production record');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const ncMatrix = ncData?.machine_matrix || [];
-  const tandemMatrix = tandemData?.line_matrix || [];
+  const handleEdit = (record) => {
+    setEditingId(record.id);
+    setFormData({
+      date: record.date || activeDate,
+      shift: record.shift || selectedShift,
+      production_type: record.production_type || 'NC',
+      machine_or_line: record.machine_or_line || 'NC-01',
+      target_qty: record.target_qty || 600,
+      actual_qty: record.actual_qty || 0,
+      good_qty: record.good_qty || 0,
+      rejected_qty: record.rejected_qty || 0,
+      operator_name: record.operator_name || '',
+      supervisor_name: record.supervisor_name || '',
+      remarks: record.remarks || '',
+      tool_number: record.tool_number || '',
+      downtime_minutes: record.downtime_minutes || 0,
+      downtime_reason: record.downtime_reason || ''
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
-  const combinedTarget = (ncData?.total_target || 0) + (tandemData?.total_target || 0);
-  const combinedActual = (ncData?.total_actual || 0) + (tandemData?.total_actual || 0);
-  const combinedGood = (ncData?.total_good || 0) + (tandemData?.total_good || 0);
-  const combinedRej = (ncData?.total_rejected || 0) + (tandemData?.total_rejected || 0);
-  const combinedDowntime = (ncData?.total_downtime || 0) + (tandemData?.total_downtime || 0);
-  const combinedAchieve = combinedTarget > 0 ? Math.round((combinedActual / combinedTarget) * 100) : 0;
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setFormData(prev => ({
+      ...prev,
+      actual_qty: 0,
+      good_qty: 0,
+      rejected_qty: 0,
+      remarks: '',
+      downtime_minutes: 0,
+      downtime_reason: ''
+    }));
+  };
 
-  // Filter machines
-  const filteredNC = ncMatrix.filter(m => {
-    if (viewFilter === 'TANDEM') return false;
-    if (statusFilter !== 'ALL' && m.status !== statusFilter) return false;
-    if (searchQuery && !m.machine_number.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-    return true;
-  });
+  const handleDelete = async (recordId) => {
+    try {
+      await api.deleteProductionRecord(recordId);
+      showNotice('success', `Record #${recordId} deleted.`);
+      setDeleteConfirmId(null);
+      loadHistory();
+      if (onSync) onSync();
+    } catch (err) {
+      showNotice('error', err.message || 'Failed to delete record');
+    }
+  };
 
-  const filteredTandem = tandemMatrix.filter(m => {
-    if (viewFilter === 'NC') return false;
-    if (statusFilter !== 'ALL' && m.status !== statusFilter) return false;
-    if (searchQuery && !m.line_id.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+  const filteredHistory = historyRecords.filter(r => {
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const matchMach = r.machine_or_line?.toLowerCase().includes(q);
+      const matchOp = r.operator_name?.toLowerCase().includes(q);
+      const matchTool = r.tool_number?.toLowerCase().includes(q);
+      if (!matchMach && !matchOp && !matchTool) return false;
+    }
     return true;
   });
 
   return (
-    <div style={{ padding: '16px', background: '#f8fafc', minHeight: '100%' }}>
-      {/* Toast Notification */}
+    <div style={{ maxWidth: 1600, margin: '0 auto', padding: '20px 24px 80px', background: '#f8fafc' }}>
+      
+      {/* Toast Notice */}
       {notification && (
         <div style={{
           padding: '12px 18px',
           borderRadius: 8,
-          marginBottom: 14,
+          marginBottom: 16,
           background: notification.type === 'success' ? '#ecfdf5' : '#fef2f2',
           border: `1px solid ${notification.type === 'success' ? '#a7f3d0' : '#fecaca'}`,
           color: notification.type === 'success' ? '#065f46' : '#991b1b',
           fontWeight: 700,
-          fontSize: '0.85rem',
+          fontSize: '0.84rem',
           display: 'flex',
           alignItems: 'center',
           gap: 8,
@@ -176,689 +256,558 @@ export default function StandardProductionEntry({ selectedDate, selectedShift, o
         </div>
       )}
 
-      {/* Top Banner / Summary Card */}
+      {/* Header Banner */}
       <div style={{
         background: '#ffffff',
-        borderRadius: 12,
-        padding: '16px 20px',
+        borderRadius: 14,
+        padding: '20px 24px',
         border: '1px solid #e2e8f0',
         boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-        marginBottom: 16
+        marginBottom: 20
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ 
-                background: '#eff6ff', 
-                color: '#1d4ed8', 
-                padding: '4px 10px', 
-                borderRadius: 6, 
-                fontWeight: 800, 
-                fontSize: '0.72rem',
-                border: '1px solid #bfdbfe'
-              }}>
-                PAGE 1 • UNIFIED PRODUCTION
-              </span>
-              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#0f172a' }}>
-                Standard Production Entry (NC Presses & Tandem Lines)
-              </h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 10, background: '#eff6ff', color: '#1e40af', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Factory size={22} />
             </div>
-            <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: 3 }}>
-              Unified shopfloor control for 16 NC Presses and 6 Tandem Lines • Shift: <strong>{selectedShift}</strong> • Date: <strong>{selectedDate}</strong>
-            </p>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ background: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe', padding: '2px 8px', borderRadius: 4, fontSize: '0.7rem', fontWeight: 800 }}>
+                  PAGE 1
+                </span>
+                <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
+                  PHA INDIA • PRESS SHOP MFG-2
+                </span>
+              </div>
+              <h1 style={{ fontSize: '1.4rem', fontWeight: 900, color: '#0f172a', margin: '2px 0 0' }}>
+                Standard Production Entry
+              </h1>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button
-              onClick={loadData}
-              disabled={loading}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '8px 14px',
-                borderRadius: 8,
-                background: '#f1f5f9',
-                border: '1px solid #cbd5e1',
-                color: '#334155',
-                fontSize: '0.82rem',
-                fontWeight: 700,
-                cursor: 'pointer'
-              }}
-            >
-              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-              <span>Refresh</span>
-            </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 700 }}>ACTIVE TELEMETRY</div>
+              <div style={{ fontSize: '0.85rem', fontWeight: 800, color: '#1e40af' }}>{formData.date} • {formData.shift}</div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-            {onSwitchToHourly && (
+      {/* Main Grid: Form (Left) + Calculation Gauges & History (Right) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(340px, 480px) 1fr', gap: 20, alignItems: 'start' }}>
+        
+        {/* ── LEFT PANEL: ENTRY FORM ── */}
+        <div style={{
+          background: '#ffffff',
+          borderRadius: 14,
+          padding: '22px',
+          border: '1px solid #e2e8f0',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.04)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <h2 style={{ fontSize: '1.05rem', fontWeight: 900, color: '#0f172a', margin: 0 }}>
+              {editingId ? `Edit Record #${editingId}` : 'Log Production Entry'}
+            </h2>
+            {editingId && (
               <button
-                onClick={onSwitchToHourly}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '8px 14px',
-                  borderRadius: 8,
-                  background: '#1e40af',
-                  border: 'none',
-                  color: '#ffffff',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  boxShadow: '0 2px 4px rgba(30,64,175,0.2)'
-                }}
+                type="button"
+                onClick={handleCancelEdit}
+                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 10px', fontSize: '0.74rem', fontWeight: 700, cursor: 'pointer' }}
               >
-                <span>⚡ Hourly Entry</span>
+                Cancel Edit
               </button>
             )}
           </div>
-        </div>
 
-        {/* Plant KPI Metrics Grid */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-          gap: 12
-        }}>
-          <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>Factory Target</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#0f172a' }}>{combinedTarget.toLocaleString()}</div>
-            <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>NC + Tandem</div>
-          </div>
+          <form onSubmit={handleSubmit}>
+            {/* 1. Date & Shift */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Date *
+                </label>
+                <input
+                  type="date"
+                  value={formData.date}
+                  onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem', fontWeight: 700 }}
+                  required
+                />
+              </div>
 
-          <div style={{ background: '#eff6ff', padding: '10px 14px', borderRadius: 8, border: '1px solid #bfdbfe' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#1d4ed8', textTransform: 'uppercase' }}>Actual Output</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#1e40af' }}>{combinedActual.toLocaleString()}</div>
-            <div style={{ fontSize: '0.7rem', color: '#2563eb', fontWeight: 700 }}>{combinedAchieve}% Achieved</div>
-          </div>
-
-          <div style={{ background: '#f0fdf4', padding: '10px 14px', borderRadius: 8, border: '1px solid #bbf7d0' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#15803d', textTransform: 'uppercase' }}>NC Subtotal</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#166534' }}>{(ncData?.total_actual || 0).toLocaleString()}</div>
-            <div style={{ fontSize: '0.7rem', color: '#15803d' }}>of {(ncData?.total_target || 0).toLocaleString()} target</div>
-          </div>
-
-          <div style={{ background: '#faf5ff', padding: '10px 14px', borderRadius: 8, border: '1px solid #e9d5ff' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#7e22ce', textTransform: 'uppercase' }}>Tandem Subtotal</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#6b21a8' }}>{(tandemData?.total_actual || 0).toLocaleString()}</div>
-            <div style={{ fontSize: '0.7rem', color: '#7e22ce' }}>of {(tandemData?.total_target || 0).toLocaleString()} target</div>
-          </div>
-
-          <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>Quality Output</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#0f172a' }}>{combinedGood.toLocaleString()}</div>
-            <div style={{ fontSize: '0.7rem', color: combinedRej > 0 ? '#dc2626' : '#16a34a' }}>
-              {combinedRej} Rejects ({combinedActual > 0 ? ((combinedRej / combinedActual) * 100).toFixed(1) : 0}%)
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Shift *
+                </label>
+                <select
+                  value={formData.shift}
+                  onChange={(e) => setFormData({ ...formData, shift: e.target.value })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem', fontWeight: 700, background: '#fff' }}
+                  required
+                >
+                  <option value="Shift A">Shift A (08:00 - 16:30)</option>
+                  <option value="Shift B">Shift B (16:30 - 01:00)</option>
+                  <option value="Shift C">Shift C (01:00 - 08:00)</option>
+                </select>
+              </div>
             </div>
-          </div>
 
-          <div style={{ background: '#fffbeb', padding: '10px 14px', borderRadius: 8, border: '1px solid #fde68a' }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#b45309', textTransform: 'uppercase' }}>Total Downtime</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, color: '#92400e' }}>{combinedDowntime} <span style={{ fontSize: '0.85rem' }}>min</span></div>
-            <div style={{ fontSize: '0.7rem', color: '#b45309' }}>Logged events</div>
-          </div>
-        </div>
-      </div>
+            {/* 2. Production Type (NC vs Tandem) */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 6 }}>
+                Production Type *
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => handleTypeChange('NC')}
+                  style={{
+                    padding: '10px',
+                    borderRadius: 8,
+                    border: formData.production_type === 'NC' ? '2px solid #1e40af' : '1px solid #cbd5e1',
+                    background: formData.production_type === 'NC' ? '#eff6ff' : '#ffffff',
+                    color: formData.production_type === 'NC' ? '#1e40af' : '#475569',
+                    fontWeight: 800,
+                    fontSize: '0.82rem',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6
+                  }}
+                >
+                  <Layers size={16} />
+                  <span>NC Press (16 Units)</span>
+                </button>
 
-      {/* Filter and View Control Bar */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        flexWrap: 'wrap',
-        gap: 10,
-        marginBottom: 16
-      }}>
-        {/* Unit Type Switcher */}
-        <div style={{ display: 'flex', background: '#e2e8f0', padding: 3, borderRadius: 8 }}>
-          <button
-            type="button"
-            onClick={() => setViewFilter('ALL')}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 6,
-              border: 'none',
-              fontSize: '0.78rem',
-              fontWeight: 800,
-              cursor: 'pointer',
-              background: viewFilter === 'ALL' ? '#ffffff' : 'transparent',
-              color: viewFilter === 'ALL' ? '#0f172a' : '#64748b',
-              boxShadow: viewFilter === 'ALL' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-            }}
-          >
-            All 22 Machines
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewFilter('NC')}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 6,
-              border: 'none',
-              fontSize: '0.78rem',
-              fontWeight: 800,
-              cursor: 'pointer',
-              background: viewFilter === 'NC' ? '#ffffff' : 'transparent',
-              color: viewFilter === 'NC' ? '#1e40af' : '#64748b',
-              boxShadow: viewFilter === 'NC' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-            }}
-          >
-            16 NC Presses
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewFilter('TANDEM')}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 6,
-              border: 'none',
-              fontSize: '0.78rem',
-              fontWeight: 800,
-              cursor: 'pointer',
-              background: viewFilter === 'TANDEM' ? '#ffffff' : 'transparent',
-              color: viewFilter === 'TANDEM' ? '#7e22ce' : '#64748b',
-              boxShadow: viewFilter === 'TANDEM' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-            }}
-          >
-            6 Tandem Lines
-          </button>
-        </div>
+                <button
+                  type="button"
+                  onClick={() => handleTypeChange('Tandem')}
+                  style={{
+                    padding: '10px',
+                    borderRadius: 8,
+                    border: formData.production_type === 'Tandem' ? '2px solid #7c3aed' : '1px solid #cbd5e1',
+                    background: formData.production_type === 'Tandem' ? '#f5f3ff' : '#ffffff',
+                    color: formData.production_type === 'Tandem' ? '#7c3aed' : '#475569',
+                    fontWeight: 800,
+                    fontSize: '0.82rem',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6
+                  }}
+                >
+                  <GitBranch size={16} />
+                  <span>Tandem (6 Lines)</span>
+                </button>
+              </div>
+            </div>
 
-        {/* Status Filter & Search */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            style={{
-              padding: '6px 10px',
-              borderRadius: 6,
-              border: '1px solid #cbd5e1',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              color: '#334155',
-              background: '#ffffff'
-            }}
-          >
-            <option value="ALL">All Statuses</option>
-            <option value="Running">Running</option>
-            <option value="Idle">Idle</option>
-            <option value="Maintenance">Maintenance</option>
-            <option value="Breakdown">Breakdown</option>
-          </select>
+            {/* 3. Machine / Line Selection */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                {formData.production_type === 'NC' ? 'NC Machine Number *' : 'Tandem Line Number *'}
+              </label>
+              <select
+                value={formData.machine_or_line}
+                onChange={(e) => setFormData({ ...formData, machine_or_line: e.target.value })}
+                style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.85rem', fontWeight: 800, background: '#fff' }}
+                required
+              >
+                {formData.production_type === 'NC'
+                  ? ncMachines.map(m => <option key={m} value={m}>{m} (Press Shop NC)</option>)
+                  : tandemLines.map(t => <option key={t} value={t}>{t} (Tandem Line)</option>)
+                }
+              </select>
+            </div>
 
-          <div style={{ position: 'relative' }}>
-            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input
-              type="text"
-              placeholder="Search machine..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+            {/* 4. Target & Actual Output */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Target Quantity *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={formData.target_qty}
+                  onChange={(e) => setFormData({ ...formData, target_qty: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.9rem', fontWeight: 800, color: '#0f172a' }}
+                  required
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#1e40af', display: 'block', marginBottom: 4 }}>
+                  Production Output (Actual) *
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={formData.actual_qty}
+                  onChange={(e) => setFormData({ ...formData, actual_qty: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '2px solid #2563eb', fontSize: '0.95rem', fontWeight: 900, color: '#1e40af' }}
+                  required
+                />
+              </div>
+            </div>
+
+            {/* 5. Scrap & Tool Number */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#dc2626', display: 'block', marginBottom: 4 }}>
+                  Scrap / Rejection Qty
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={formData.rejected_qty}
+                  onChange={(e) => setFormData({ ...formData, rejected_qty: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Tool / Die Number
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. TL-1001-CTR"
+                  value={formData.tool_number}
+                  onChange={(e) => setFormData({ ...formData, tool_number: e.target.value })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                />
+              </div>
+            </div>
+
+            {/* 6. Operator Name & Supervisor Name */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Operator Name
+                </label>
+                {operatorsList.length > 0 ? (
+                  <select
+                    value={formData.operator_name}
+                    onChange={(e) => setFormData({ ...formData, operator_name: e.target.value })}
+                    style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem', background: '#fff' }}
+                  >
+                    <option value="">Select Operator...</option>
+                    {operatorsList.map(op => (
+                      <option key={op.emp_id} value={op.name}>{op.name} ({op.emp_id})</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="Enter operator name"
+                    value={formData.operator_name}
+                    onChange={(e) => setFormData({ ...formData, operator_name: e.target.value })}
+                    style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                  />
+                )}
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Supervisor Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="Supervisor in charge"
+                  value={formData.supervisor_name}
+                  onChange={(e) => setFormData({ ...formData, supervisor_name: e.target.value })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                />
+              </div>
+            </div>
+
+            {/* 7. Downtime & Reason */}
+            <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 10, marginBottom: 14 }}>
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#ea580c', display: 'block', marginBottom: 4 }}>
+                  Downtime (min)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={formData.downtime_minutes}
+                  onChange={(e) => setFormData({ ...formData, downtime_minutes: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: '100%', padding: '9px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                  Downtime Reason
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Die cleaning, sensor calibration, coil feed"
+                  value={formData.downtime_reason}
+                  onChange={(e) => setFormData({ ...formData, downtime_reason: e.target.value })}
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                />
+              </div>
+            </div>
+
+            {/* 8. Remarks */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 4 }}>
+                Remarks & Shopfloor Notes
+              </label>
+              <textarea
+                rows={2}
+                placeholder="Quality observations, changeover remarks..."
+                value={formData.remarks}
+                onChange={(e) => setFormData({ ...formData, remarks: e.target.value })}
+                style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: '0.82rem', resize: 'none' }}
+              />
+            </div>
+
+            {/* Submit Button */}
+            <button
+              type="submit"
+              disabled={submitting}
               style={{
-                padding: '6px 12px 6px 30px',
-                borderRadius: 6,
-                border: '1px solid #cbd5e1',
-                fontSize: '0.8rem',
-                width: 150
+                width: '100%',
+                padding: '12px',
+                borderRadius: 8,
+                border: 'none',
+                background: editingId ? '#0f766e' : '#2563eb',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 900,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                boxShadow: '0 4px 12px rgba(37,99,235,0.3)'
               }}
-            />
-          </div>
+            >
+              <Check size={18} />
+              <span>{editingId ? 'Update Production Entry' : 'Save Production Entry'}</span>
+            </button>
+          </form>
         </div>
-      </div>
 
-      {/* SECTION 1: NC PRESS PRODUCTION (16 MACHINES) */}
-      {(viewFilter === 'ALL' || viewFilter === 'NC') && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: 10
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Layers size={18} color="#1e40af" />
-              <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#0f172a' }}>
-                NC Machine Presses (16 Dedicated Positions)
-              </h3>
-              <span style={{ background: '#dbeafe', color: '#1e40af', padding: '2px 8px', borderRadius: 12, fontSize: '0.72rem', fontWeight: 800 }}>
-                {filteredNC.length} Units
-              </span>
+        {/* ── RIGHT PANEL: LIVE GAUGES & HISTORY TABLE ── */}
+        <div>
+          {/* Automatic Calculation Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
+            {/* Target Achievement % */}
+            <div style={{ background: '#ffffff', padding: '16px 18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase' }}>
+                Auto Achievement
+              </div>
+              <div style={{ fontSize: '1.8rem', fontWeight: 900, color: achievementPct >= 95 ? '#059669' : (achievementPct >= 75 ? '#d97706' : '#dc2626'), margin: '4px 0 2px' }}>
+                {achievementPct}%
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                {actualVal} of {targetVal} units
+              </div>
+              <div style={{ width: '100%', height: 5, background: '#e2e8f0', borderRadius: 3, marginTop: 6, overflow: 'hidden' }}>
+                <div style={{ width: `${Math.min(100, achievementPct)}%`, height: '100%', background: achievementPct >= 95 ? '#10b981' : '#2563eb' }} />
+              </div>
             </div>
-            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              Standard stroke rate: 75 pcs/hr
+
+            {/* Remaining Production */}
+            <div style={{ background: '#ffffff', padding: '16px 18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase' }}>
+                Remaining Production
+              </div>
+              <div style={{ fontSize: '1.8rem', fontWeight: 900, color: remainingQty === 0 ? '#059669' : '#1e40af', margin: '4px 0 2px' }}>
+                {remainingQty.toLocaleString()}
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                {remainingQty === 0 ? 'Target fully completed!' : 'Units left to reach goal'}
+              </div>
             </div>
-          </div>
 
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-            gap: 12
-          }}>
-            {filteredNC.map((m) => {
-              const target = m.hourly_target || 75;
-              const actual = m.total_actual || 0;
-              const achieve = target > 0 ? Math.round((actual / target) * 100) : 0;
-              const statusColor = m.status === 'Running' ? '#10b981' : m.status === 'Breakdown' ? '#ef4444' : m.status === 'Maintenance' ? '#f59e0b' : '#64748b';
-
-              return (
-                <div 
-                  key={m.machine_number}
-                  style={{
-                    background: '#ffffff',
-                    borderRadius: 10,
-                    border: '1px solid #e2e8f0',
-                    padding: '14px',
-                    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'space-between'
-                  }}
-                >
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#0f172a' }}>{m.machine_number}</span>
-                        <span style={{ fontSize: '0.7rem', background: '#f1f5f9', color: '#475569', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>
-                          {m.tonnage}T
-                        </span>
-                      </div>
-                      <span style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 4,
-                        fontSize: '0.7rem',
-                        fontWeight: 700,
-                        color: statusColor,
-                        background: `${statusColor}15`,
-                        padding: '2px 8px',
-                        borderRadius: 12
-                      }}>
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor }}></span>
-                        {m.status || 'Idle'}
-                      </span>
-                    </div>
-
-                    <div style={{ fontSize: '0.75rem', color: '#64748b', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <User size={12} />
-                      <span>{m.operator || 'Unassigned'}</span>
-                    </div>
-
-                    {/* Progress Bar */}
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', fontWeight: 700, marginBottom: 3 }}>
-                        <span style={{ color: '#64748b' }}>Actual: {actual} / {target}</span>
-                        <span style={{ color: achieve >= 95 ? '#16a34a' : achieve >= 80 ? '#ca8a04' : '#dc2626' }}>{achieve}%</span>
-                      </div>
-                      <div style={{ width: '100%', height: 6, background: '#f1f5f9', borderRadius: 3, overflow: 'hidden' }}>
-                        <div style={{
-                          width: `${Math.min(100, achieve)}%`,
-                          height: '100%',
-                          background: achieve >= 95 ? '#10b981' : achieve >= 80 ? '#f59e0b' : '#ef4444',
-                          borderRadius: 3
-                        }} />
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#64748b', background: '#f8fafc', padding: '6px 8px', borderRadius: 6, marginBottom: 10 }}>
-                      <span>Good: <strong style={{ color: '#0f172a' }}>{m.total_good || 0}</strong></span>
-                      <span>Scrap: <strong style={{ color: '#ef4444' }}>{m.total_rejected || 0}</strong></span>
-                      <span>Downtime: <strong style={{ color: '#d97706' }}>{m.total_downtime || 0}m</strong></span>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleOpenModal(m, 'NC')}
-                    style={{
-                      width: '100%',
-                      padding: '8px',
-                      borderRadius: 6,
-                      background: '#eff6ff',
-                      color: '#1d4ed8',
-                      border: '1px solid #bfdbfe',
-                      fontSize: '0.78rem',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 6
-                    }}
-                  >
-                    <Plus size={14} />
-                    <span>Log Production</span>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* SECTION 2: TANDEM PRODUCTION LINES (6 LINES) */}
-      {(viewFilter === 'ALL' || viewFilter === 'TANDEM') && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: 10
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <GitBranch size={18} color="#7e22ce" />
-              <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#0f172a' }}>
-                Tandem Production (6 Dedicated Heavy Lines)
-              </h3>
-              <span style={{ background: '#f3e8ff', color: '#7e22ce', padding: '2px 8px', borderRadius: 12, fontSize: '0.72rem', fontWeight: 800 }}>
-                {filteredTandem.length} Lines
-              </span>
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              LP-1, LP-2, HP-1, HP-2, HP-3, HP-4
+            {/* Quality Pass Rate */}
+            <div style={{ background: '#ffffff', padding: '16px 18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase' }}>
+                Good Output Rate
+              </div>
+              <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#059669', margin: '4px 0 2px' }}>
+                {actualVal > 0 ? Math.round(((actualVal - (Number(formData.rejected_qty) || 0)) / actualVal) * 100) : 100}%
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                {Math.max(0, actualVal - (Number(formData.rejected_qty) || 0))} good parts
+              </div>
             </div>
           </div>
 
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-            gap: 12
-          }}>
-            {filteredTandem.map((t) => {
-              const target = t.hourly_target || 125;
-              const actual = t.total_actual || 0;
-              const achieve = target > 0 ? Math.round((actual / target) * 100) : 0;
-              const statusColor = t.status === 'Running' ? '#10b981' : t.status === 'Breakdown' ? '#ef4444' : t.status === 'Maintenance' ? '#f59e0b' : '#64748b';
-
-              return (
-                <div 
-                  key={t.line_id}
-                  style={{
-                    background: '#ffffff',
-                    borderRadius: 10,
-                    border: '1px solid #e2e8f0',
-                    padding: '14px',
-                    boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'space-between'
-                  }}
-                >
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: '1.05rem', fontWeight: 800, color: '#7e22ce' }}>{t.line_id}</span>
-                        <span style={{ fontSize: '0.7rem', background: '#f5f3ff', color: '#6b21a8', padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>
-                          {t.tonnage}T
-                        </span>
-                      </div>
-                      <span style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 4,
-                        fontSize: '0.7rem',
-                        fontWeight: 700,
-                        color: statusColor,
-                        background: `${statusColor}15`,
-                        padding: '2px 8px',
-                        borderRadius: 12
-                      }}>
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor }}></span>
-                        {t.status || 'Idle'}
-                      </span>
-                    </div>
-
-                    <div style={{ fontSize: '0.75rem', color: '#64748b', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <User size={12} />
-                      <span>Line Lead: {t.line_lead || 'Assigned Lead'}</span>
-                    </div>
-
-                    {/* Progress Bar */}
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', fontWeight: 700, marginBottom: 3 }}>
-                        <span style={{ color: '#64748b' }}>Actual: {actual} / {target}</span>
-                        <span style={{ color: achieve >= 95 ? '#16a34a' : achieve >= 80 ? '#ca8a04' : '#dc2626' }}>{achieve}%</span>
-                      </div>
-                      <div style={{ width: '100%', height: 6, background: '#f1f5f9', borderRadius: 3, overflow: 'hidden' }}>
-                        <div style={{
-                          width: `${Math.min(100, achieve)}%`,
-                          height: '100%',
-                          background: achieve >= 95 ? '#10b981' : achieve >= 80 ? '#f59e0b' : '#ef4444',
-                          borderRadius: 3
-                        }} />
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#64748b', background: '#faf5ff', padding: '6px 8px', borderRadius: 6, marginBottom: 10 }}>
-                      <span>Good: <strong style={{ color: '#0f172a' }}>{t.total_good || 0}</strong></span>
-                      <span>Scrap: <strong style={{ color: '#ef4444' }}>{t.total_rejected || 0}</strong></span>
-                      <span>Downtime: <strong style={{ color: '#d97706' }}>{t.total_downtime || 0}m</strong></span>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleOpenModal(t, 'Tandem')}
-                    style={{
-                      width: '100%',
-                      padding: '8px',
-                      borderRadius: 6,
-                      background: '#faf5ff',
-                      color: '#7e22ce',
-                      border: '1px solid #e9d5ff',
-                      fontSize: '0.78rem',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 6
-                    }}
-                  >
-                    <Plus size={14} />
-                    <span>Log Line Output</span>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Production Entry Modal */}
-      {showModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(15,23,42,0.65)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1200,
-          padding: 16
-        }}>
+          {/* ── PRODUCTION HISTORY TABLE ── */}
           <div style={{
             background: '#ffffff',
             borderRadius: 14,
-            width: '100%',
-            maxWidth: 520,
-            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)',
+            border: '1px solid #e2e8f0',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
             overflow: 'hidden'
           }}>
-            <div style={{
-              padding: '14px 18px',
-              background: modalForm.production_type === 'NC' ? '#1e40af' : '#7e22ce',
-              color: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between'
-            }}>
+            {/* Filter Bar */}
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Cpu size={18} />
-                <h3 style={{ fontSize: '1rem', fontWeight: 800 }}>
-                  Log Production — {modalForm.machine_or_line} ({modalForm.production_type})
+                <FileSpreadsheet size={18} color="#1e40af" />
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+                  Production History ({filteredHistory.length} records)
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowModal(false)}
-                style={{ background: 'transparent', border: 'none', color: '#ffffff', cursor: 'pointer' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
 
-            <form onSubmit={handleSaveProduction} style={{ padding: '16px 20px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                    Hour Interval
-                  </label>
-                  <select
-                    value={modalForm.hour_interval}
-                    onChange={(e) => setModalForm({ ...modalForm, hour_interval: e.target.value })}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
-                  >
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map(h => (
-                      <option key={h} value={`Hour ${h}`}>Hour {h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                    Operator Assigned
-                  </label>
-                  <select
-                    value={modalForm.operator_name}
-                    onChange={(e) => setModalForm({ ...modalForm, operator_name: e.target.value })}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
-                  >
-                    {operatorsList.map(op => (
-                      <option key={op.id} value={op.display}>{op.display}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                    Target Qty
-                  </label>
-                  <input
-                    type="number"
-                    value={modalForm.target_qty}
-                    onChange={(e) => setModalForm({ ...modalForm, target_qty: parseInt(e.target.value) || 0 })}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem', fontWeight: 700 }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#1e40af', display: 'block', marginBottom: 4 }}>
-                    Actual Output
-                  </label>
-                  <input
-                    type="number"
-                    value={modalForm.actual_qty}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value) || 0;
-                      setModalForm({ 
-                        ...modalForm, 
-                        actual_qty: val,
-                        good_qty: Math.max(0, val - modalForm.rejected_qty)
-                      });
-                    }}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #3b82f6', fontSize: '0.82rem', fontWeight: 800, color: '#1e40af' }}
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#dc2626', display: 'block', marginBottom: 4 }}>
-                    Rejections
-                  </label>
-                  <input
-                    type="number"
-                    value={modalForm.rejected_qty}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value) || 0;
-                      setModalForm({ 
-                        ...modalForm, 
-                        rejected_qty: val,
-                        good_qty: Math.max(0, modalForm.actual_qty - val)
-                      });
-                    }}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10, marginBottom: 12 }}>
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#b45309', display: 'block', marginBottom: 4 }}>
-                    Downtime (min)
-                  </label>
-                  <input
-                    type="number"
-                    value={modalForm.downtime_minutes}
-                    onChange={(e) => setModalForm({ ...modalForm, downtime_minutes: parseInt(e.target.value) || 0 })}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                    Downtime Reason
-                  </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                {/* Search */}
+                <div style={{ position: 'relative' }}>
+                  <Search size={14} color="#94a3b8" style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)' }} />
                   <input
                     type="text"
-                    placeholder="e.g. Die change, sensor fault"
-                    value={modalForm.downtime_reason}
-                    onChange={(e) => setModalForm({ ...modalForm, downtime_reason: e.target.value })}
-                    style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                    placeholder="Search machine, tool, operator..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    style={{ padding: '6px 10px 6px 28px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.76rem', width: 170 }}
                   />
                 </div>
-              </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 16 }}>
+                {/* Filter Date */}
+                <input
+                  type="date"
+                  value={filterDate}
+                  onChange={(e) => setFilterDate(e.target.value)}
+                  style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.76rem' }}
+                />
+
+                {/* Filter Shift */}
+                <select
+                  value={filterShift}
+                  onChange={(e) => setFilterShift(e.target.value)}
+                  style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.76rem', background: '#fff' }}
+                >
+                  <option value="ALL">All Shifts</option>
+                  <option value="Shift A">Shift A</option>
+                  <option value="Shift B">Shift B</option>
+                  <option value="Shift C">Shift C</option>
+                </select>
+
                 <button
                   type="button"
-                  onClick={() => setShowModal(false)}
-                  style={{
-                    padding: '8px 16px',
-                    borderRadius: 6,
-                    border: '1px solid #cbd5e1',
-                    background: '#ffffff',
-                    fontSize: '0.82rem',
-                    fontWeight: 700,
-                    cursor: 'pointer'
-                  }}
+                  onClick={loadHistory}
+                  title="Reload History"
+                  style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', cursor: 'pointer' }}
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  style={{
-                    padding: '8px 20px',
-                    borderRadius: 6,
-                    border: 'none',
-                    background: modalForm.production_type === 'NC' ? '#1e40af' : '#7e22ce',
-                    color: '#ffffff',
-                    fontSize: '0.82rem',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-                  }}
-                >
-                  Save Output
+                  <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
                 </button>
               </div>
-            </form>
+            </div>
+
+            {/* Table */}
+            {filteredHistory.length === 0 ? (
+              <div style={{ padding: '60px 20px', textAlign: 'center', color: '#94a3b8' }}>
+                <Factory size={36} color="#cbd5e1" style={{ margin: '0 auto 10px' }} />
+                <div style={{ fontWeight: 800, color: '#475569', fontSize: '0.95rem' }}>No Production Records Found</div>
+                <div style={{ fontSize: '0.76rem', marginTop: 4 }}>
+                  Fill out the form on the left and click "Save Production Entry" to log output into the database.
+                </div>
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                  <thead>
+                    <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>ID</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Machine / Line</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Date & Shift</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Tool #</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Operator</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Target</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Actual</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Achievement</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800 }}>Remaining</th>
+                      <th style={{ padding: '10px 14px', fontWeight: 800, textAlign: 'center' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredHistory.map((r) => {
+                      const ach = r.target_qty > 0 ? Math.round((r.actual_qty / r.target_qty) * 100) : 0;
+                      const rem = Math.max(0, r.target_qty - r.actual_qty);
+                      const isConfirmingDelete = deleteConfirmId === r.id;
+
+                      return (
+                        <tr key={r.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '10px 14px', color: '#64748b' }}>#{r.id}</td>
+                          <td style={{ padding: '10px 14px', fontWeight: 800, color: '#1e40af' }}>{r.machine_or_line}</td>
+                          <td style={{ padding: '10px 14px', color: '#334155' }}>{r.date} ({r.shift})</td>
+                          <td style={{ padding: '10px 14px', color: '#475569' }}>{r.tool_number || '—'}</td>
+                          <td style={{ padding: '10px 14px', color: '#334155' }}>{r.operator_name || '—'}</td>
+                          <td style={{ padding: '10px 14px', color: '#64748b' }}>{r.target_qty}</td>
+                          <td style={{ padding: '10px 14px', fontWeight: 800, color: '#0f172a' }}>{r.actual_qty}</td>
+                          <td style={{ padding: '10px 14px' }}>
+                            <span style={{
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontWeight: 800,
+                              fontSize: '0.72rem',
+                              background: ach >= 95 ? '#ecfdf5' : (ach >= 75 ? '#fffbeb' : '#fef2f2'),
+                              color: ach >= 95 ? '#059669' : (ach >= 75 ? '#d97706' : '#dc2626')
+                            }}>
+                              {ach}%
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 14px', color: rem === 0 ? '#059669' : '#64748b', fontWeight: rem === 0 ? 800 : 500 }}>
+                            {rem === 0 ? '✓ Met' : rem}
+                          </td>
+                          <td style={{ padding: '10px 14px', textAlign: 'center' }}>
+                            {isConfirmingDelete ? (
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDelete(r.id)}
+                                  style={{ background: '#dc2626', color: '#fff', border: 'none', borderRadius: 4, padding: '3px 8px', fontSize: '0.7rem', fontWeight: 800, cursor: 'pointer' }}
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmId(null)}
+                                  style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: 4, padding: '3px 8px', fontSize: '0.7rem', cursor: 'pointer' }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleEdit(r)}
+                                  title="Edit entry"
+                                  style={{ background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', borderRadius: 4, padding: '4px 6px', cursor: 'pointer' }}
+                                >
+                                  <Edit size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmId(r.id)}
+                                  title="Delete entry"
+                                  style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', borderRadius: 4, padding: '4px 6px', cursor: 'pointer' }}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

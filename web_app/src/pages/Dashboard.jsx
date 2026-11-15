@@ -3,6 +3,7 @@ import {
   Users, 
   Cpu, 
   TrendingUp, 
+  TrendingDown,
   CheckCircle2, 
   Bell, 
   User, 
@@ -12,112 +13,62 @@ import {
   ChevronRight, 
   ArrowUpRight,
   ChevronDown,
-  RefreshCw,
+  RefreshCw, 
+  Factory, 
+  Clock, 
+  Layers, 
+  GitBranch,
+  Activity, 
+  AlertTriangle, 
+  Target,
   Sparkles,
-  Factory,
-  Clock,
-  Layers,
-  Activity,
-  AlertTriangle,
-  Play,
-  RotateCcw,
+  ShieldCheck,
   Check,
-  Trash2,
-  Sliders,
-  ShieldCheck
+  X,
+  Gauge,
+  ArrowRight
 } from 'lucide-react';
-import { api, getServerUrl } from '../api';
+import { api } from '../api';
 import NotificationModal from '../components/NotificationModal';
 
 export default function Dashboard({ selectedDate, selectedShift = 'Shift A', setActiveTab }) {
   const [kpis, setKpis] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [timeFilter, setTimeFilter] = useState('Today');
+  const [notifications, setNotifications] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [activeChartTab, setActiveChartTab] = useState('hourly'); // 'hourly' | 'shift' | 'nc-tandem' | 'machines' | 'weekly' | 'monthly'
 
-  // Notifications State with persistence in localStorage
-  const defaultNotifications = [
-    {
-      id: 1,
-      title: 'Shift Production Target Achieved',
-      message: 'Shift A output reached 98.5% efficiency across NC-01 through NC-16.',
-      time: '10m ago',
-      type: 'success',
-      category: 'Production'
-    },
-    {
-      id: 2,
-      title: 'Tool Inspection Scheduled',
-      message: 'Preventive tooling review due for NC-04 after 500 strokes.',
-      time: '25m ago',
-      type: 'warning',
-      category: 'Maintenance'
-    },
-    {
-      id: 3,
-      title: 'Manpower Allocation Active',
-      message: '19 active operators assigned to plant lines for today.',
-      time: '1h ago',
-      type: 'manpower',
-      category: 'Attendance'
-    }
-  ];
+  const activeDate = selectedDate || new Date().toISOString().split('T')[0];
 
-  const [notifications, setNotifications] = useState(() => {
-    try {
-      const isCleared = localStorage.getItem('pha_notifications_cleared');
-      if (isCleared === 'true') return [];
-      const stored = localStorage.getItem('pha_notifications');
-      return stored ? JSON.parse(stored) : defaultNotifications;
-    } catch (e) {
-      return defaultNotifications;
-    }
-  });
-
-  const handleClearAllNotifications = () => {
-    setNotifications([]);
-    localStorage.setItem('pha_notifications_cleared', 'true');
-    localStorage.removeItem('pha_notifications');
-  };
-
-  const handleDismissNotification = (id) => {
-    const updated = notifications.filter(n => n.id !== id);
-    setNotifications(updated);
-    if (updated.length === 0) {
-      localStorage.setItem('pha_notifications_cleared', 'true');
-    } else {
-      localStorage.setItem('pha_notifications', JSON.stringify(updated));
-    }
-  };
-
-  // Current logged in user info (defaults to SACHIN S)
+  // User info from local storage or defaults
   const [userInfo, setUserInfo] = useState(() => {
     try {
       const stored = localStorage.getItem('pha_user');
       if (stored) {
         const u = JSON.parse(stored);
         return {
-          name: u.full_name || 'SACHIN S',
-          empId: u.emp_id || 'A20755',
+          name: u.full_name || 'Shift Supervisor',
           role: u.role || 'Supervisor',
           department: u.department || 'Press Shop MFG-2'
         };
       }
     } catch (e) {}
-    return { name: 'SACHIN S', empId: 'A20755', role: 'Supervisor', department: 'Press Shop MFG-2' };
+    return { name: 'Shift Supervisor', role: 'Supervisor', department: 'Press Shop MFG-2' };
   });
 
   useEffect(() => {
-    loadDashboardData();
-  }, [selectedDate, selectedShift]);
+    loadAllDashboardData();
+  }, [activeDate, selectedShift]);
 
-  const loadDashboardData = async () => {
+  const loadAllDashboardData = async () => {
     try {
       setLoading(true);
-      const data = await api.getKpis(selectedDate, selectedShift);
-      if (data && typeof data === 'object') {
-        setKpis(data);
-      }
+      const [kRes, nRes] = await Promise.all([
+        api.getKpis(activeDate, selectedShift),
+        api.getNotifications().catch(() => ({ notifications: [] }))
+      ]);
+      setKpis(kRes);
+      setNotifications(nRes.notifications || []);
     } catch (err) {
       console.warn('Dashboard live sync note:', err);
     } finally {
@@ -125,953 +76,867 @@ export default function Dashboard({ selectedDate, selectedShift = 'Shift A', set
     }
   };
 
-  // Safe metrics
-  const totalManpower = kpis?.total_employees || 19;
-  const totalMachines = (kpis?.total_nc_machines || 16) + (kpis?.total_tandem_lines || 6); // 22
-  const prodPct = kpis?.shift_production?.achievement_pct ? `${kpis.shift_production.achievement_pct}%` : '98.5%';
-  const attendancePct = kpis?.attendance_rate ? `${kpis.attendance_rate}%` : '96.2%';
-  const totalProduced = kpis?.shift_production?.total_actual || 4280;
-  const targetQty = kpis?.shift_production?.total_target || 4500;
+  // Safe data extractions from SQLite response
+  const kpiCards = kpis?.kpi_cards || {};
+  const sp = kpis?.shift_production || {};
+  const dp = kpis?.day_production || {};
+  const nc = kpis?.nc_summary || {};
+  const tan = kpis?.tandem_summary || {};
+  const shiftBreakdown = kpis?.shift_breakdown || {};
+  const hourlyBreakdown = kpis?.hourly_breakdown || [];
+  const weeklyTrend = kpis?.weekly_trend || [];
+  const monthlyTrend = kpis?.monthly_trend || [];
+  const machinePerf = kpis?.machine_performance || [];
+  const bestMach = kpis?.best_machine;
+  const lowestMach = kpis?.lowest_machine;
+  const recentProd = kpis?.recent_production || [];
 
-  // Hourly curve data
-  const hourlyData = [
-    { hour: '1st', label: '1st Hour', target: 500, actual: 480 },
-    { hour: '2nd', label: '2nd Hour', target: 500, actual: 510 },
-    { hour: '3rd', label: '3rd Hour', target: 500, actual: 495 },
-    { hour: '4th', label: '4th Hour', target: 500, actual: 520 },
-    { hour: '5th', label: '5th Hour', target: 500, actual: 490 },
-    { hour: '6th', label: '6th Hour', target: 500, actual: 530 },
-    { hour: '7th', label: '7th Hour', target: 500, actual: 515 },
-    { hour: '8th', label: '8th Hour', target: 500, actual: 540 }
+  // 12 Mandatory KPI values directly from real database
+  const kpiList = [
+    {
+      id: 1,
+      title: "Today's Total Production",
+      value: (kpiCards.today_total_production ?? dp.actual ?? 0).toLocaleString(),
+      subtext: `${(dp.good ?? 0).toLocaleString()} good parts produced today`,
+      icon: Factory,
+      color: '#1e40af',
+      bg: '#eff6ff',
+      border: '#bfdbfe',
+      targetTab: 'standard-production'
+    },
+    {
+      id: 2,
+      title: "NC Production",
+      value: (kpiCards.nc_production ?? nc.actual ?? 0).toLocaleString(),
+      subtext: `Target: ${(nc.target ?? 0).toLocaleString()} (${nc.achievement_pct ?? 0}%)`,
+      icon: Layers,
+      color: '#0369a1',
+      bg: '#f0f9ff',
+      border: '#bae6fd',
+      targetTab: 'nc-production'
+    },
+    {
+      id: 3,
+      title: "Tandem Production",
+      value: (kpiCards.tandem_production ?? tan.actual ?? 0).toLocaleString(),
+      subtext: `Target: ${(tan.target ?? 0).toLocaleString()} (${tan.achievement_pct ?? 0}%)`,
+      icon: GitBranch,
+      color: '#7c3aed',
+      bg: '#f5f3ff',
+      border: '#ddd6fe',
+      targetTab: 'tandem-production'
+    },
+    {
+      id: 4,
+      title: "Total Production Target",
+      value: (kpiCards.total_production_target ?? sp.target ?? 0).toLocaleString(),
+      subtext: `Shift goal across active lines`,
+      icon: Target,
+      color: '#0f766e',
+      bg: '#f0fdfa',
+      border: '#99f6e4',
+      targetTab: 'standard-production'
+    },
+    {
+      id: 5,
+      title: "Actual Production",
+      value: (kpiCards.actual_production ?? sp.actual ?? 0).toLocaleString(),
+      subtext: `Variance: ${((sp.actual ?? 0) - (sp.target ?? 0)).toLocaleString()} units`,
+      icon: TrendingUp,
+      color: '#2563eb',
+      bg: '#eff6ff',
+      border: '#bfdbfe',
+      targetTab: 'hourly-production'
+    },
+    {
+      id: 6,
+      title: "Achievement Rate",
+      value: `${kpiCards.achievement_pct ?? sp.achievement_pct ?? 0}%`,
+      subtext: (kpiCards.achievement_pct ?? sp.achievement_pct ?? 0) >= 95 ? 'Target Exceeded' : 'Below Target Rate',
+      icon: Gauge,
+      color: (kpiCards.achievement_pct ?? sp.achievement_pct ?? 0) >= 95 ? '#059669' : '#d97706',
+      bg: (kpiCards.achievement_pct ?? sp.achievement_pct ?? 0) >= 95 ? '#ecfdf5' : '#fffbeb',
+      border: (kpiCards.achievement_pct ?? sp.achievement_pct ?? 0) >= 95 ? '#a7f3d0' : '#fde68a',
+      targetTab: 'production-dashboard'
+    },
+    {
+      id: 7,
+      title: "Total Manpower",
+      value: (kpiCards.total_manpower ?? kpis?.total_employees ?? 0).toLocaleString(),
+      subtext: 'Registered plant employees',
+      icon: Users,
+      color: '#334155',
+      bg: '#f8fafc',
+      border: '#e2e8f0',
+      targetTab: 'employees'
+    },
+    {
+      id: 8,
+      title: "Present Employees",
+      value: (kpiCards.present_employees ?? kpis?.employees_present ?? 0).toLocaleString(),
+      subtext: `On duty for ${selectedShift}`,
+      icon: CheckCircle2,
+      color: '#15803d',
+      bg: '#f0fdf4',
+      border: '#bbf7d0',
+      targetTab: 'attendance'
+    },
+    {
+      id: 9,
+      title: "Absent Employees",
+      value: (kpiCards.absent_employees ?? kpis?.employees_absent ?? 0).toLocaleString(),
+      subtext: `${kpis?.employees_on_leave ?? 0} on authorized leave`,
+      icon: AlertTriangle,
+      color: (kpiCards.absent_employees ?? 0) > 0 ? '#b91c1c' : '#64748b',
+      bg: (kpiCards.absent_employees ?? 0) > 0 ? '#fef2f2' : '#f8fafc',
+      border: (kpiCards.absent_employees ?? 0) > 0 ? '#fecaca' : '#e2e8f0',
+      targetTab: 'attendance'
+    },
+    {
+      id: 10,
+      title: "Running Machines",
+      value: `${kpiCards.running_machines ?? ((kpis?.active_nc_machines ?? 0) + (kpis?.active_tandem_lines ?? 0))}`,
+      subtext: `Active out of 22 machines`,
+      icon: Cpu,
+      color: '#16a34a',
+      bg: '#f0fdf4',
+      border: '#bbf7d0',
+      targetTab: 'machines'
+    },
+    {
+      id: 11,
+      title: "Stopped Machines",
+      value: `${kpiCards.stopped_machines ?? 0}`,
+      subtext: 'Idle or under maintenance',
+      icon: AlertTriangle,
+      color: (kpiCards.stopped_machines ?? 0) > 0 ? '#ea580c' : '#64748b',
+      bg: (kpiCards.stopped_machines ?? 0) > 0 ? '#fff7ed' : '#f8fafc',
+      border: (kpiCards.stopped_machines ?? 0) > 0 ? '#fed7aa' : '#e2e8f0',
+      targetTab: 'machines'
+    },
+    {
+      id: 12,
+      title: "Total Downtime",
+      value: `${kpiCards.total_downtime ?? sp.downtime_minutes ?? 0}m`,
+      subtext: 'Cumulative lost minutes',
+      icon: Clock,
+      color: (kpiCards.total_downtime ?? 0) > 30 ? '#dc2626' : '#64748b',
+      bg: (kpiCards.total_downtime ?? 0) > 30 ? '#fef2f2' : '#f8fafc',
+      border: (kpiCards.total_downtime ?? 0) > 30 ? '#fecaca' : '#e2e8f0',
+      targetTab: 'machines'
+    }
   ];
 
   return (
-    <div className="page-container dashboard-page-wrapper" style={{ maxWidth: 1600, margin: '0 auto', padding: '24px 28px 80px' }}>
+    <div style={{ maxWidth: 1600, margin: '0 auto', padding: '20px 24px 80px', background: '#f8fafc' }}>
       
-      {/* ============================================================== */}
-      {/* 1. DESKTOP EXECUTIVE VIEW (Visible on Desktop >= 901px)        */}
-      {/* ============================================================== */}
-      <div className="desktop-dashboard-view">
-        
-        {/* EXECUTIVE WELCOME BANNER */}
-        <div style={{
-          background: 'linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #1E3A8A 100%)',
-          borderRadius: 20,
-          padding: '24px 28px',
-          color: '#ffffff',
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 20,
-          marginBottom: 24,
-          boxShadow: '0 10px 25px -5px rgba(15, 23, 42, 0.25)',
-          position: 'relative',
-          overflow: 'hidden'
-        }}>
-          {/* Subtle background glow */}
+      {/* ── TOP EXECUTIVE BANNER ── */}
+      <div style={{
+        background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #1e3a8a 100%)',
+        borderRadius: 16,
+        padding: '22px 28px',
+        color: '#ffffff',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 20,
+        marginBottom: 22,
+        boxShadow: '0 8px 24px -4px rgba(15, 23, 42, 0.25)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{
-            position: 'absolute',
-            top: -40,
-            right: -40,
-            width: 220,
-            height: 220,
-            borderRadius: '50%',
-            background: 'radial-gradient(circle, rgba(59, 130, 246, 0.25) 0%, transparent 70%)',
-            pointerEvents: 'none'
-          }} />
-
-          {/* User info & Plant state */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, zIndex: 2 }}>
-            <div style={{
-              width: 58,
-              height: 58,
-              borderRadius: '50%',
-              background: '#FDE047',
-              border: '3px solid #ffffff',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0
-            }}>
-              <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-                <rect width="48" height="48" fill="#FBBF24"/>
-                <ellipse cx="24" cy="20" rx="10" ry="11" fill="#FCD34D"/>
-                <path d="M12 18 C12 10, 36 10, 36 18 Z" fill="#F59E0B"/>
-                <rect x="10" y="16" width="28" height="4" rx="2" fill="#D97706"/>
-                <path d="M10 44 C10 32, 38 32, 38 44 Z" fill="#2563EB"/>
-                <circle cx="21" cy="21" r="1.5" fill="#1F2937"/>
-                <circle cx="27" cy="21" r="1.5" fill="#1F2937"/>
-                <path d="M21 26 Q24 28 27 26" stroke="#1F2937" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
+            width: 52,
+            height: 52,
+            borderRadius: 14,
+            background: '#2563eb',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 4px 12px rgba(37,99,235,0.4)',
+            color: '#fff',
+            fontWeight: 900,
+            fontSize: '1.2rem'
+          }}>
+            PHA
+          </div>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+              <span style={{ fontSize: '0.72rem', background: '#2563eb', color: '#fff', fontWeight: 800, padding: '2px 8px', borderRadius: 4, textTransform: 'uppercase' }}>
+                {userInfo.role}
+              </span>
+              <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+                PHA INDIA PRIVATE LIMITED • PRESS SHOP MFG-2
+              </span>
             </div>
-
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <span style={{ fontSize: '0.74rem', background: '#2563EB', color: '#ffffff', fontWeight: 800, padding: '2px 8px', borderRadius: 6, textTransform: 'uppercase' }}>
-                  Shopfloor Executive
-                </span>
-                <span style={{ fontSize: '0.76rem', color: '#94A3B8' }}>
-                  {userInfo.department}
-                </span>
-              </div>
-              <h1 style={{ fontSize: '1.65rem', fontWeight: 900, color: '#ffffff', margin: 0, letterSpacing: -0.3 }}>
-                Welcome, {userInfo.name}
-              </h1>
-              <div style={{ fontSize: '0.82rem', color: '#CBD5E1', marginTop: 4, display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span>Emp ID: <strong style={{ color: '#60A5FA' }}>{userInfo.empId}</strong></span>
-                <span>•</span>
-                <span>Active Shift: <strong style={{ color: '#34D399' }}>{selectedShift}</strong></span>
-                <span>•</span>
-                <span>Plant 1 (Sriperumbudur)</span>
-              </div>
+            <h1 style={{ fontSize: '1.5rem', fontWeight: 900, margin: 0, letterSpacing: -0.3 }}>
+              Manufacturing Command Center
+            </h1>
+            <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span>Operator: <strong style={{ color: '#93c5fd' }}>{userInfo.name}</strong></span>
+              <span>•</span>
+              <span>Active Date: <strong style={{ color: '#6ee7b7' }}>{activeDate}</strong></span>
+              <span>•</span>
+              <span>Shift: <strong style={{ color: '#fde047' }}>{selectedShift}</strong></span>
             </div>
           </div>
+        </div>
 
-          {/* Quick Action Station */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, zIndex: 2 }}>
-            {/* Bell Notification Button */}
-            <div style={{ position: 'relative' }}>
-              <button
-                type="button"
-                onClick={() => setShowNotificationModal(true)}
-                title="View Plant Notifications & Alerts"
-                style={{
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  border: '1px solid rgba(255, 255, 255, 0.2)',
-                  borderRadius: 12,
-                  width: 44,
-                  height: 44,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: '#ffffff',
-                  cursor: 'pointer',
-                  transition: 'background 0.2s'
-                }}
-              >
-                <Bell size={20} />
-              </button>
-              {notifications.length > 0 && (
-                <span style={{
-                  position: 'absolute',
-                  top: -4,
-                  right: -4,
-                  background: '#EF4444',
-                  color: '#ffffff',
-                  fontSize: '0.68rem',
-                  fontWeight: 900,
-                  width: 19,
-                  height: 19,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  border: '2px solid #0F172A'
-                }}>
-                  {notifications.length}
-                </span>
-              )}
-            </div>
-
-            {/* Log Hourly Entry */}
+        {/* Quick Actions */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* Notifications Button */}
+          <div style={{ position: 'relative' }}>
             <button
               type="button"
-              onClick={() => setActiveTab('hourly-production')}
+              onClick={() => setShowNotificationModal(true)}
+              title="Factory Notifications"
               style={{
-                background: '#1E88E5',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: 12,
-                padding: '10px 18px',
-                fontSize: '0.84rem',
-                fontWeight: 800,
+                background: 'rgba(255, 255, 255, 0.1)',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                borderRadius: 10,
+                width: 42,
+                height: 42,
                 display: 'flex',
                 alignItems: 'center',
-                gap: 8,
-                cursor: 'pointer',
-                boxShadow: '0 4px 12px rgba(30,136,229,0.35)'
-              }}
-            >
-              <Factory size={16} />
-              <span>Log Hourly Output</span>
-            </button>
-
-            {/* Manpower Management */}
-            <button
-              type="button"
-              onClick={() => setActiveTab('employees')}
-              style={{
-                background: 'rgba(255, 255, 255, 0.15)',
+                justifyContent: 'center',
                 color: '#ffffff',
-                border: '1px solid rgba(255, 255, 255, 0.25)',
-                borderRadius: 12,
-                padding: '10px 18px',
-                fontSize: '0.84rem',
-                fontWeight: 800,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
                 cursor: 'pointer'
               }}
             >
-              <Users size={16} />
-              <span>Manpower Roster</span>
-            </button>
-          </div>
-        </div>
-
-        {/* 4 EXECUTIVE KPI CARDS (Wide Grid) */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 18,
-          marginBottom: 24
-        }}>
-          {/* Card 1: Shift Production Achievement */}
-          <div 
-            onClick={() => setActiveTab('production-hub')}
-            style={{
-              background: '#ffffff',
-              borderRadius: 18,
-              padding: '20px',
-              border: '1px solid #E2E8F0',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              cursor: 'pointer',
-              transition: 'transform 0.15s ease'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <span style={{ fontSize: '0.76rem', color: '#64748B', fontWeight: 800, textTransform: 'uppercase' }}>
-                Shift Production
-              </span>
-              <div style={{ width: 38, height: 38, borderRadius: 10, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1E88E5' }}>
-                <TrendingUp size={20} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: '2rem', fontWeight: 900, color: '#0F172A', letterSpacing: -0.5 }}>
-                {prodPct}
-              </span>
-              <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#10B981', background: '#ECFDF5', padding: '2px 8px', borderRadius: 8 }}>
-                Target 95%+
-              </span>
-            </div>
-            <div style={{ fontSize: '0.78rem', color: '#64748B', marginTop: 6 }}>
-              {totalProduced.toLocaleString()} of {targetQty.toLocaleString()} units completed
-            </div>
-          </div>
-
-          {/* Card 2: Plant Manpower */}
-          <div 
-            onClick={() => setActiveTab('employees')}
-            style={{
-              background: '#ffffff',
-              borderRadius: 18,
-              padding: '20px',
-              border: '1px solid #E2E8F0',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              cursor: 'pointer',
-              transition: 'transform 0.15s ease'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <span style={{ fontSize: '0.76rem', color: '#64748B', fontWeight: 800, textTransform: 'uppercase' }}>
-                Active Manpower
-              </span>
-              <div style={{ width: 38, height: 38, borderRadius: 10, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1E88E5' }}>
-                <Users size={20} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: '2rem', fontWeight: 900, color: '#0F172A', letterSpacing: -0.5 }}>
-                {totalManpower}
-              </span>
-              <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#3B82F6', background: '#EFF6FF', padding: '2px 8px', borderRadius: 8 }}>
-                Allocated
-              </span>
-            </div>
-            <div style={{ fontSize: '0.78rem', color: '#64748B', marginTop: 6 }}>
-              19 Active Operators & Helpers across plant
-            </div>
-          </div>
-
-          {/* Card 3: Machine Availability */}
-          <div 
-            onClick={() => setActiveTab('machines')}
-            style={{
-              background: '#ffffff',
-              borderRadius: 18,
-              padding: '20px',
-              border: '1px solid #E2E8F0',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              cursor: 'pointer',
-              transition: 'transform 0.15s ease'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <span style={{ fontSize: '0.76rem', color: '#64748B', fontWeight: 800, textTransform: 'uppercase' }}>
-                Press Fleet Status
-              </span>
-              <div style={{ width: 38, height: 38, borderRadius: 10, background: '#ECFDF5', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10B981' }}>
-                <Cpu size={20} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: '2rem', fontWeight: 900, color: '#0F172A', letterSpacing: -0.5 }}>
-                {totalMachines} Units
-              </span>
-              <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#059669', background: '#ECFDF5', padding: '2px 8px', borderRadius: 8 }}>
-                Running
-              </span>
-            </div>
-            <div style={{ fontSize: '0.78rem', color: '#64748B', marginTop: 6 }}>
-              16 NC Presses + 6 Tandem Lines online
-            </div>
-          </div>
-
-          {/* Card 4: Daily Attendance */}
-          <div 
-            onClick={() => setActiveTab('attendance')}
-            style={{
-              background: '#ffffff',
-              borderRadius: 18,
-              padding: '20px',
-              border: '1px solid #E2E8F0',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              cursor: 'pointer',
-              transition: 'transform 0.15s ease'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <span style={{ fontSize: '0.76rem', color: '#64748B', fontWeight: 800, textTransform: 'uppercase' }}>
-                Shift Attendance
-              </span>
-              <div style={{ width: 38, height: 38, borderRadius: 10, background: '#F5F3FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8B5CF6' }}>
-                <CheckCircle2 size={20} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ fontSize: '2rem', fontWeight: 900, color: '#0F172A', letterSpacing: -0.5 }}>
-                {attendancePct}
-              </span>
-              <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#7C3AED', background: '#F5F3FF', padding: '2px 8px', borderRadius: 8 }}>
-                Optimal
-              </span>
-            </div>
-            <div style={{ fontSize: '0.78rem', color: '#64748B', marginTop: 6 }}>
-              {selectedShift} roster checked and verified
-            </div>
-          </div>
-        </div>
-
-        {/* MIDDLE SECTION: 2 COLUMNS (Production Chart & Fleet Status) */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: '2fr 1fr',
-          gap: 20,
-          marginBottom: 24
-        }}>
-          {/* Column 1: Shift Hourly Production Curve */}
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 18,
-            padding: '22px 24px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.03)'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <div>
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: '#102A43', margin: 0 }}>
-                  Shift Hourly Output Progression
-                </h3>
-                <p style={{ margin: 0, fontSize: '0.74rem', color: '#64748B' }}>
-                  Sequential Hourly Output (Target: 500 pcs/hr vs Actual Pieces)
-                </p>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.74rem', color: '#64748B' }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 2, background: '#CBD5E1' }} />
-                  <span>Target</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.74rem', color: '#1E88E5', fontWeight: 700 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 2, background: '#1E88E5' }} />
-                  <span>Actual</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Wide Production Bar Chart */}
-            <div style={{ height: 230, display: 'flex', alignItems: 'flex-end', gap: 16, paddingTop: 20 }}>
-              {hourlyData.map((d, idx) => {
-                const targetHeight = (d.target / 600) * 160;
-                const actualHeight = (d.actual / 600) * 160;
-                const isOver = d.actual >= d.target;
-                return (
-                  <div key={idx} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: '0.74rem', fontWeight: 800, color: isOver ? '#059669' : '#1E88E5' }}>
-                      {d.actual}
-                    </span>
-                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, width: '100%', justifyContent: 'center' }}>
-                      {/* Target bar */}
-                      <div style={{
-                        width: '30%',
-                        height: targetHeight,
-                        background: '#E2E8F0',
-                        borderRadius: '4px 4px 0 0'
-                      }} />
-                      {/* Actual bar */}
-                      <div style={{
-                        width: '45%',
-                        height: actualHeight,
-                        background: isOver ? 'linear-gradient(180deg, #10B981 0%, #059669 100%)' : 'linear-gradient(180deg, #3B82F6 0%, #1D4ED8 100%)',
-                        borderRadius: '4px 4px 0 0',
-                        boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
-                      }} />
-                    </div>
-                    <span style={{ fontSize: '0.74rem', fontWeight: 700, color: '#64748B' }}>
-                      {d.hour}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Column 2: Machine Fleet Matrix */}
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 18,
-            padding: '22px 24px',
-            border: '1px solid #E2E8F0',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-              <div>
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: '#102A43', margin: 0 }}>
-                  Active Line Fleet
-                </h3>
-                <p style={{ margin: 0, fontSize: '0.74rem', color: '#64748B' }}>
-                  Live Cell Status & Allocation
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveTab('cell-status')}
-                style={{
-                  background: '#EFF6FF',
-                  border: '1px solid #BFDBFE',
-                  color: '#1E40AF',
-                  borderRadius: 8,
-                  padding: '4px 8px',
-                  fontSize: '0.72rem',
-                  fontWeight: 800,
-                  cursor: 'pointer'
-                }}
-              >
-                View Pareto
-              </button>
-            </div>
-
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', maxHeight: 220 }}>
-              {/* NC Press Group */}
-              <div style={{ padding: '10px 12px', background: '#F8FAFC', borderRadius: 12, border: '1px solid #E2E8F0' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#102A43' }}>
-                    NC Presses (16 Units)
-                  </span>
-                  <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#10B981', background: '#ECFDF5', padding: '2px 6px', borderRadius: 6 }}>
-                    100% Online
-                  </span>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
-                  {['NC-01', 'NC-02', 'NC-03', 'NC-04', 'NC-05', 'NC-06', 'NC-07', 'NC-08'].map(m => (
-                    <div 
-                      key={m} 
-                      onClick={() => setActiveTab('hourly-production')}
-                      style={{
-                        padding: '4px 6px',
-                        background: '#ffffff',
-                        border: '1px solid #CBD5E1',
-                        borderRadius: 6,
-                        textAlign: 'center',
-                        fontSize: '0.7rem',
-                        fontWeight: 800,
-                        color: '#1E40AF',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      {m}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Tandem Lines Group */}
-              <div style={{ padding: '10px 12px', background: '#F8FAFC', borderRadius: 12, border: '1px solid #E2E8F0' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#102A43' }}>
-                    Tandem Lines (6 Units)
-                  </span>
-                  <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#10B981', background: '#ECFDF5', padding: '2px 6px', borderRadius: 6 }}>
-                    Running
-                  </span>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
-                  {['LP-1', 'LP-2', 'HP-1', 'HP-2', 'HP-3', 'HP-4'].map(m => (
-                    <div 
-                      key={m} 
-                      onClick={() => setActiveTab('hourly-production')}
-                      style={{
-                        padding: '4px 6px',
-                        background: '#ffffff',
-                        border: '1px solid #CBD5E1',
-                        borderRadius: 6,
-                        textAlign: 'center',
-                        fontSize: '0.7rem',
-                        fontWeight: 800,
-                        color: '#059669',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      {m}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* BOTTOM QUICK ACCESS BAR */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 16
-        }}>
-          <button
-            type="button"
-            onClick={() => setActiveTab('hourly-production')}
-            style={{
-              padding: '16px',
-              borderRadius: 14,
-              border: '1px solid #E2E8F0',
-              background: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              cursor: 'pointer',
-              textAlign: 'left',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.02)'
-            }}
-          >
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1E88E5' }}>
-              <Factory size={20} />
-            </div>
-            <div>
-              <div style={{ fontSize: '0.86rem', fontWeight: 800, color: '#102A43' }}>Hourly Output</div>
-              <div style={{ fontSize: '0.72rem', color: '#64748B' }}>Sequential 1st to 8th hr</div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('employees')}
-            style={{
-              padding: '16px',
-              borderRadius: 14,
-              border: '1px solid #E2E8F0',
-              background: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              cursor: 'pointer',
-              textAlign: 'left',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.02)'
-            }}
-          >
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: '#ECFDF5', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10B981' }}>
-              <Users size={20} />
-            </div>
-            <div>
-              <div style={{ fontSize: '0.86rem', fontWeight: 800, color: '#102A43' }}>Manpower Roster</div>
-              <div style={{ fontSize: '0.72rem', color: '#64748B' }}>1-Click Present/Absent</div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('handovers')}
-            style={{
-              padding: '16px',
-              borderRadius: 14,
-              border: '1px solid #E2E8F0',
-              background: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              cursor: 'pointer',
-              textAlign: 'left',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.02)'
-            }}
-          >
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: '#FFFBEB', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#F59E0B' }}>
-              <Clock size={20} />
-            </div>
-            <div>
-              <div style={{ fontSize: '0.86rem', fontWeight: 800, color: '#102A43' }}>Shift Handover</div>
-              <div style={{ fontSize: '0.72rem', color: '#64748B' }}>Notes & Line Handover</div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('reports')}
-            style={{
-              padding: '16px',
-              borderRadius: 14,
-              border: '1px solid #E2E8F0',
-              background: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              cursor: 'pointer',
-              textAlign: 'left',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.02)'
-            }}
-          >
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: '#F5F3FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8B5CF6' }}>
-              <FileText size={20} />
-            </div>
-            <div>
-              <div style={{ fontSize: '0.86rem', fontWeight: 800, color: '#102A43' }}>Reports & CSV</div>
-              <div style={{ fontSize: '0.72rem', color: '#64748B' }}>Exports & Clear Data</div>
-            </div>
-          </button>
-        </div>
-
-      </div>
-
-      {/* ============================================================== */}
-      {/* 2. MOBILE APP VIEW (Visible on Screens < 901px / Android APK)  */}
-      {/* ============================================================== */}
-      <div className="mobile-dashboard-view" style={{ display: 'none' }}>
-        
-        {/* Mobile Top Bar */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{
-              width: 34,
-              height: 34,
-              borderRadius: '50%',
-              background: 'linear-gradient(135deg, #1E88E5 0%, #1565C0 100%)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#fff',
-              boxShadow: '0 2px 8px rgba(30, 136, 229, 0.35)'
-            }}>
-              <Factory size={18} />
-            </div>
-            <div>
-              <div style={{ fontSize: '1rem', fontWeight: 900, color: '#102A43', letterSpacing: 0.5 }}>
-                PHA INDIA
-              </div>
-              <div style={{ fontSize: '0.68rem', color: '#6B7C93', fontWeight: 600 }}>
-                PRESS SHOP MFG-2
-              </div>
-            </div>
-          </div>
-
-          {/* Notification Bell with Badge */}
-          <div style={{ position: 'relative', cursor: 'pointer' }} onClick={() => setShowNotificationModal(true)}>
-            <div style={{
-              width: 38,
-              height: 38,
-              borderRadius: 12,
-              background: '#ffffff',
-              border: '1px solid #E2E8F0',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#102A43',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.04)'
-            }}>
               <Bell size={18} />
-            </div>
+            </button>
             {notifications.length > 0 && (
               <span style={{
                 position: 'absolute',
-                top: -3,
-                right: -3,
-                background: '#EF4444',
-                color: '#ffffff',
-                fontSize: '0.65rem',
-                fontWeight: 800,
-                width: 17,
-                height: 17,
+                top: -4,
+                right: -4,
+                background: '#ef4444',
+                color: '#fff',
+                fontSize: '0.66rem',
+                fontWeight: 900,
+                width: 18,
+                height: 18,
                 borderRadius: '50%',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                border: '2px solid #fff'
+                border: '2px solid #0f172a'
               }}>
                 {notifications.length}
               </span>
             )}
           </div>
-        </div>
 
-        {/* Worker Welcome Card */}
-        <div style={{
-          background: 'linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%)',
-          borderRadius: 18,
-          padding: '16px 18px',
-          border: '1px solid #BFDBFE',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 18,
-          position: 'relative',
-          overflow: 'hidden'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14, zIndex: 2 }}>
-            <div style={{
-              width: 50,
-              height: 50,
-              borderRadius: '50%',
-              background: '#FDE047',
-              border: '3px solid #ffffff',
-              boxShadow: '0 3px 8px rgba(0,0,0,0.12)',
+          <button
+            type="button"
+            onClick={() => setActiveTab('standard-production')}
+            style={{
+              background: '#2563eb',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: 10,
+              padding: '10px 16px',
+              fontSize: '0.82rem',
+              fontWeight: 800,
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center'
-            }}>
-              <svg width="42" height="42" viewBox="0 0 48 48" fill="none">
-                <rect width="48" height="48" fill="#FBBF24"/>
-                <ellipse cx="24" cy="20" rx="10" ry="11" fill="#FCD34D"/>
-                <path d="M12 18 C12 10, 36 10, 36 18 Z" fill="#F59E0B"/>
-                <rect x="10" y="16" width="28" height="4" rx="2" fill="#D97706"/>
-                <path d="M10 44 C10 32, 38 32, 38 44 Z" fill="#2563EB"/>
-                <circle cx="21" cy="21" r="1.5" fill="#1F2937"/>
-                <circle cx="27" cy="21" r="1.5" fill="#1F2937"/>
-              </svg>
-            </div>
-
-            <div>
-              <div style={{ fontSize: '0.74rem', color: '#3B82F6', fontWeight: 700 }}>
-                Welcome Back!
-              </div>
-              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0F172A', lineHeight: 1.2 }}>
-                {userInfo.name}
-              </div>
-              <div style={{ fontSize: '0.74rem', color: '#475569', fontWeight: 600 }}>
-                {userInfo.role} • {userInfo.empId}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* 4 Colorful Grid Cards (2x2) */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 12,
-          marginBottom: 20
-        }}>
-          {/* Card 1: Manpower */}
-          <div 
-            onClick={() => setActiveTab('employees')}
-            style={{
-              background: 'linear-gradient(135deg, #1E88E5 0%, #1976D2 100%)',
-              borderRadius: 18,
-              padding: '16px 14px',
-              color: '#ffffff',
-              boxShadow: '0 4px 14px rgba(30, 136, 229, 0.3)',
-              cursor: 'pointer'
+              gap: 8,
+              cursor: 'pointer',
+              boxShadow: '0 4px 12px rgba(37,99,235,0.35)'
             }}
           >
-            <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(255, 255, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
-              <Users size={18} color="#ffffff" />
-            </div>
-            <div style={{ fontSize: '0.74rem', color: '#E3F2FD', fontWeight: 600 }}>
-              Total Manpower
-            </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 900, lineHeight: 1.1, marginTop: 2 }}>
-              {totalManpower}
-            </div>
-          </div>
+            <Factory size={16} />
+            <span>Production Entry</span>
+          </button>
 
-          {/* Card 2: Machines */}
-          <div 
-            onClick={() => setActiveTab('machines')}
-            style={{
-              background: 'linear-gradient(135deg, #00C853 0%, #00B074 100%)',
-              borderRadius: 18,
-              padding: '16px 14px',
-              color: '#ffffff',
-              boxShadow: '0 4px 14px rgba(0, 176, 116, 0.3)',
-              cursor: 'pointer'
-            }}
-          >
-            <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(255, 255, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
-              <Cpu size={18} color="#ffffff" />
-            </div>
-            <div style={{ fontSize: '0.74rem', color: '#E8F5E9', fontWeight: 600 }}>
-              Machines
-            </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 900, lineHeight: 1.1, marginTop: 2 }}>
-              {totalMachines}
-            </div>
-          </div>
-
-          {/* Card 3: Production */}
-          <div 
-            onClick={() => setActiveTab('production-hub')}
-            style={{
-              background: 'linear-gradient(135deg, #FF9800 0%, #FB8C00 100%)',
-              borderRadius: 18,
-              padding: '16px 14px',
-              color: '#ffffff',
-              boxShadow: '0 4px 14px rgba(251, 140, 0, 0.3)',
-              cursor: 'pointer'
-            }}
-          >
-            <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(255, 255, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
-              <TrendingUp size={18} color="#ffffff" />
-            </div>
-            <div style={{ fontSize: '0.74rem', color: '#FFF3E0', fontWeight: 600 }}>
-              Production
-            </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 900, lineHeight: 1.1, marginTop: 2 }}>
-              {prodPct}
-            </div>
-          </div>
-
-          {/* Card 4: Attendance */}
-          <div 
-            onClick={() => setActiveTab('attendance')}
-            style={{
-              background: 'linear-gradient(135deg, #7E57C2 0%, #5E35B1 100%)',
-              borderRadius: 18,
-              padding: '16px 14px',
-              color: '#ffffff',
-              boxShadow: '0 4px 14px rgba(94, 53, 177, 0.3)',
-              cursor: 'pointer'
-            }}
-          >
-            <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(255, 255, 255, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
-              <CheckCircle2 size={18} color="#ffffff" />
-            </div>
-            <div style={{ fontSize: '0.74rem', color: '#EDE7F6', fontWeight: 600 }}>
-              Attendance
-            </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 900, lineHeight: 1.1, marginTop: 2 }}>
-              {attendancePct}
-            </div>
-          </div>
-        </div>
-
-        {/* Mobile Curved Output Graph */}
-        <div style={{
-          background: '#ffffff',
-          borderRadius: 20,
-          padding: '16px 18px',
-          border: '1px solid #E2E8F0',
-          boxShadow: '0 2px 10px rgba(0,0,0,0.04)',
-          marginBottom: 18
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-            <div>
-              <div style={{ fontSize: '0.94rem', fontWeight: 900, color: '#102A43' }}>
-                Shift Production Output
-              </div>
-              <div style={{ fontSize: '0.7rem', color: '#6B7C93' }}>
-                Actual vs Target Progression
-              </div>
-            </div>
-            <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#00B074', background: '#E8F5E9', padding: '3px 8px', borderRadius: 8 }}>
-              98.5%
-            </span>
-          </div>
-
-          <svg width="100%" height="90" viewBox="0 0 300 80" preserveAspectRatio="none">
-            <defs>
-              <linearGradient id="mobileGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#1E88E5" stopOpacity="0.35"/>
-                <stop offset="100%" stopColor="#1E88E5" stopOpacity="0.0"/>
-              </linearGradient>
-            </defs>
-            <path d="M 0,55 Q 50,45 100,50 T 200,30 T 300,18 L 300,80 L 0,80 Z" fill="url(#mobileGrad)" />
-            <path d="M 0,55 Q 50,45 100,50 T 200,30 T 300,18" fill="none" stroke="#1E88E5" strokeWidth="3" strokeLinecap="round" />
-            <circle cx="300" cy="18" r="4" fill="#1E88E5" stroke="#ffffff" strokeWidth="2" />
-          </svg>
-        </div>
-
-        {/* Mobile Quick Action Buttons */}
-        <div style={{ display: 'flex', gap: 10 }}>
           <button
             type="button"
             onClick={() => setActiveTab('hourly-production')}
             style={{
-              flex: 1,
-              background: '#1E88E5',
+              background: 'rgba(255, 255, 255, 0.15)',
               color: '#ffffff',
-              border: 'none',
-              borderRadius: 14,
-              padding: '12px',
+              border: '1px solid rgba(255, 255, 255, 0.25)',
+              borderRadius: 10,
+              padding: '10px 16px',
               fontSize: '0.82rem',
               fontWeight: 800,
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center',
-              gap: 6,
+              gap: 8,
               cursor: 'pointer'
             }}
           >
-            <Factory size={16} />
-            <span>Hourly Entry</span>
+            <Clock size={16} />
+            <span>Hourly Log</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('employees')}
+            onClick={loadAllDashboardData}
+            title="Refresh Live Data"
             style={{
-              flex: 1,
-              background: '#F1F5F9',
-              color: '#102A43',
-              border: '1px solid #CBD5E1',
-              borderRadius: 14,
-              padding: '12px',
-              fontSize: '0.82rem',
-              fontWeight: 800,
+              background: 'rgba(255, 255, 255, 0.1)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: 10,
+              width: 42,
+              height: 42,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: 6,
+              color: '#ffffff',
               cursor: 'pointer'
             }}
           >
-            <Users size={16} />
-            <span>Manpower</span>
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
+      </div>
+
+      {/* ── 12 MANDATORY EXECUTIVE KPI CARDS ── */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#334155', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            Executive KPI Indicators (Real-Time Database Telemetry)
+          </div>
+          <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
+            12 Metrics across Manpower, Machines & Output
+          </span>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
+          gap: 14
+        }}>
+          {kpiList.map((kpi) => {
+            const Icon = kpi.icon;
+            return (
+              <div
+                key={kpi.id}
+                onClick={() => setActiveTab(kpi.targetTab)}
+                style={{
+                  background: '#ffffff',
+                  borderRadius: 12,
+                  padding: '16px 18px',
+                  border: `1px solid ${kpi.border || '#e2e8f0'}`,
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+                  cursor: 'pointer',
+                  transition: 'all 0.18s ease',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 6px 14px rgba(0,0,0,0.06)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'none';
+                  e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.03)';
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase' }}>
+                    {kpi.title}
+                  </span>
+                  <div style={{ width: 34, height: 34, borderRadius: 8, background: kpi.bg, color: kpi.color, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Icon size={17} />
+                  </div>
+                </div>
+
+                <div style={{ fontSize: '1.65rem', fontWeight: 900, color: '#0f172a', letterSpacing: -0.5, margin: '2px 0 4px' }}>
+                  {kpi.value}
+                </div>
+
+                <div style={{ fontSize: '0.74rem', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>{kpi.subtext}</span>
+                  <ArrowRight size={12} color="#94a3b8" />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── PERFORMANCE HIGHLIGHT SUMMARY STRIP ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+        gap: 14,
+        marginBottom: 24
+      }}>
+        {/* Today's Summary */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>
+            Today's Production Summary
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <div style={{ fontSize: '1.35rem', fontWeight: 900, color: '#0f172a' }}>
+                {(dp.actual ?? 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>/ {(dp.target ?? 0).toLocaleString()}</span>
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#059669', fontWeight: 700, marginTop: 2 }}>
+                {dp.achievement_pct ?? 0}% Full Day Achievement
+              </div>
+            </div>
+            <div style={{ width: 70, height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ width: `${Math.min(100, dp.achievement_pct ?? 0)}%`, height: '100%', background: '#2563eb' }} />
+            </div>
+          </div>
+        </div>
+
+        {/* Current Shift Summary */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>
+            {selectedShift} Summary
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <div style={{ fontSize: '1.35rem', fontWeight: 900, color: '#0f172a' }}>
+                {(sp.actual ?? 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>/ {(sp.target ?? 0).toLocaleString()}</span>
+              </div>
+              <div style={{ fontSize: '0.74rem', color: (sp.actual ?? 0) >= (sp.target ?? 0) ? '#059669' : '#d97706', fontWeight: 700, marginTop: 2 }}>
+                {(sp.good ?? 0).toLocaleString()} Good • {(sp.rejected ?? 0).toLocaleString()} Scrap ({sp.rejection_pct ?? 0}%)
+              </div>
+            </div>
+            <div style={{ width: 70, height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ width: `${Math.min(100, sp.achievement_pct ?? 0)}%`, height: '100%', background: '#10b981' }} />
+            </div>
+          </div>
+        </div>
+
+        {/* Best Performing Machine */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#059669', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <TrendingUp size={13} />
+            <span>Top Performing Machine</span>
+          </div>
+          {bestMach ? (
+            <div>
+              <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#0f172a' }}>
+                {bestMach.machine_or_line} <span style={{ fontSize: '0.75rem', color: '#059669', fontWeight: 800 }}>({bestMach.achievement_pct}% Target)</span>
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
+                {bestMach.actual} pcs produced • {bestMach.downtime}m downtime
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
+              No production logged yet today
+            </div>
+          )}
+        </div>
+
+        {/* Lowest Performing Machine */}
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#dc2626', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <TrendingDown size={13} />
+            <span>Lowest Performing Machine</span>
+          </div>
+          {lowestMach && lowestMach.actual > 0 ? (
+            <div>
+              <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#0f172a' }}>
+                {lowestMach.machine_or_line} <span style={{ fontSize: '0.75rem', color: '#dc2626', fontWeight: 800 }}>({lowestMach.achievement_pct}% Target)</span>
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
+                {lowestMach.actual} pcs produced • {lowestMach.downtime}m downtime
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
+              All machines operating within normal limits
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 7 INTERACTIVE CHARTS & VISUALIZATIONS ── */}
+      <div style={{
+        background: '#ffffff',
+        borderRadius: 14,
+        border: '1px solid #e2e8f0',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+        padding: '20px 24px',
+        marginBottom: 24
+      }}>
+        {/* Chart Tab Navigation */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+          <div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 900, color: '#0f172a', margin: 0 }}>
+              Production Intelligence & Visual Analytics
+            </h2>
+            <p style={{ fontSize: '0.78rem', color: '#64748b', margin: '2px 0 0' }}>
+              Select a view to analyze hourly curves, shift comparisons, machine outputs, and multi-day trends
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, background: '#f1f5f9', padding: 4, borderRadius: 10 }}>
+            {[
+              { id: 'hourly', label: 'Hourly Curve' },
+              { id: 'shift', label: 'Shift Comparison' },
+              { id: 'nc-tandem', label: 'NC vs Tandem' },
+              { id: 'machines', label: 'Machine-Wise' },
+              { id: 'weekly', label: '7-Day Weekly' },
+              { id: 'monthly', label: '30-Day Monthly' }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveChartTab(tab.id)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: activeChartTab === tab.id ? '#ffffff' : 'transparent',
+                  color: activeChartTab === tab.id ? '#1e40af' : '#64748b',
+                  fontWeight: activeChartTab === tab.id ? 800 : 600,
+                  fontSize: '0.78rem',
+                  cursor: 'pointer',
+                  boxShadow: activeChartTab === tab.id ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 1. HOURLY PRODUCTION CHART */}
+        {activeChartTab === 'hourly' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              Hour-by-Hour Actual Output vs Target for {selectedShift} on {activeDate}
+            </div>
+
+            {hourlyBreakdown.length === 0 ? (
+              <div style={{ padding: '40px 20px', textAlign: 'center', color: '#94a3b8' }}>
+                <Clock size={36} color="#cbd5e1" style={{ margin: '0 auto 10px' }} />
+                <div style={{ fontWeight: 700, color: '#475569' }}>No hourly records submitted yet for this shift.</div>
+                <div style={{ fontSize: '0.76rem', marginTop: 4 }}>Go to Hourly Production Entry to record Hour 1 to Hour 8 output.</div>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${hourlyBreakdown.length}, 1fr)`, gap: 10, alignItems: 'flex-end', minHeight: 200, padding: '20px 0 10px' }}>
+                {hourlyBreakdown.map((h, i) => {
+                  const maxVal = Math.max(...hourlyBreakdown.map(x => Math.max(x.target, x.actual)), 100);
+                  const actH = Math.max(8, Math.round((h.actual / maxVal) * 160));
+                  const tgtH = Math.max(8, Math.round((h.target / maxVal) * 160));
+                  const belowTarget = h.actual < h.target;
+
+                  return (
+                    <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                      <div style={{ fontSize: '0.7rem', fontWeight: 800, color: belowTarget ? '#dc2626' : '#10b981' }}>
+                        {h.actual}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 160 }}>
+                        {/* Target Bar */}
+                        <div
+                          title={`Target: ${h.target}`}
+                          style={{
+                            width: 12,
+                            height: tgtH,
+                            background: '#e2e8f0',
+                            borderRadius: '3px 3px 0 0'
+                          }}
+                        />
+                        {/* Actual Bar */}
+                        <div
+                          title={`Actual: ${h.actual}`}
+                          style={{
+                            width: 18,
+                            height: actH,
+                            background: belowTarget ? '#f59e0b' : '#2563eb',
+                            borderRadius: '4px 4px 0 0'
+                          }}
+                        />
+                      </div>
+
+                      <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                        {h.hour_interval}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 20, marginTop: 14, fontSize: '0.74rem' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 12, height: 12, background: '#2563eb', borderRadius: 2 }} /> Actual Output</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 12, height: 12, background: '#f59e0b', borderRadius: 2 }} /> Output Below Target</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 12, height: 12, background: '#e2e8f0', borderRadius: 2 }} /> Target Benchmark</span>
+            </div>
+          </div>
+        )}
+
+        {/* 2. SHIFT-WISE PRODUCTION COMPARISON */}
+        {activeChartTab === 'shift' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              Three-Shift Performance Comparison (Shift A vs Shift B vs Shift C)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+              {['Shift A', 'Shift B', 'Shift C'].map((sName) => {
+                const sData = shiftBreakdown[sName] || { target: 0, actual: 0, good: 0, rejected: 0, achievement_pct: 0 };
+                return (
+                  <div key={sName} style={{ background: '#f8fafc', padding: '16px', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontWeight: 800, fontSize: '0.9rem', color: '#0f172a' }}>{sName}</span>
+                      <span style={{ fontSize: '0.75rem', fontWeight: 800, color: sData.achievement_pct >= 95 ? '#059669' : '#d97706', background: sData.achievement_pct >= 95 ? '#ecfdf5' : '#fffbeb', padding: '2px 8px', borderRadius: 6 }}>
+                        {sData.achievement_pct}% Target
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 900, color: '#1e40af', marginBottom: 4 }}>
+                      {(sData.actual || 0).toLocaleString()} <span style={{ fontSize: '0.8rem', color: '#64748b' }}>/ {(sData.target || 0).toLocaleString()}</span>
+                    </div>
+                    <div style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                      Good: {(sData.good || 0).toLocaleString()} • Scrap: {(sData.rejected || 0).toLocaleString()}
+                    </div>
+                    <div style={{ width: '100%', height: 6, background: '#e2e8f0', borderRadius: 3, marginTop: 8, overflow: 'hidden' }}>
+                      <div style={{ width: `${Math.min(100, sData.achievement_pct || 0)}%`, height: '100%', background: '#2563eb' }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 3. NC VS TANDEM COMPARISON */}
+        {activeChartTab === 'nc-tandem' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              Production Division: NC Press Fleet (16 Units) vs Tandem Lines (6 Units)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              {/* NC Box */}
+              <div style={{ background: '#f0f9ff', padding: '18px', borderRadius: 12, border: '1px solid #bae6fd' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <Layers size={18} color="#0369a1" />
+                  <span style={{ fontWeight: 900, fontSize: '0.95rem', color: '#0369a1' }}>NC Press Fleet (16 Machines)</span>
+                </div>
+                <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#0f172a' }}>
+                  {(nc.actual || 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b' }}>units</span>
+                </div>
+                <div style={{ fontSize: '0.78rem', color: '#475569', marginTop: 4 }}>
+                  Target: {(nc.target || 0).toLocaleString()} ({nc.achievement_pct || 0}% Achievement)
+                </div>
+                <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
+                  Good: {(nc.good || 0).toLocaleString()} • Downtime: {nc.downtime || 0}m
+                </div>
+              </div>
+
+              {/* Tandem Box */}
+              <div style={{ background: '#f5f3ff', padding: '18px', borderRadius: 12, border: '1px solid #ddd6fe' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <GitBranch size={18} color="#7c3aed" />
+                  <span style={{ fontWeight: 900, fontSize: '0.95rem', color: '#7c3aed' }}>Tandem Lines (6 Lines)</span>
+                </div>
+                <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#0f172a' }}>
+                  {(tan.actual || 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b' }}>units</span>
+                </div>
+                <div style={{ fontSize: '0.78rem', color: '#475569', marginTop: 4 }}>
+                  Target: {(tan.target || 0).toLocaleString()} ({tan.achievement_pct || 0}% Achievement)
+                </div>
+                <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
+                  Good: {(tan.good || 0).toLocaleString()} • Downtime: {tan.downtime || 0}m
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 4. MACHINE-WISE PRODUCTION */}
+        {activeChartTab === 'machines' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              Active Machines Production & Target Output Today
+            </div>
+            {machinePerf.length === 0 ? (
+              <div style={{ padding: '30px 20px', textAlign: 'center', color: '#94a3b8' }}>
+                No machine-specific output recorded yet for today.
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+                {machinePerf.map((m, i) => (
+                  <div key={i} style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontWeight: 800, fontSize: '0.85rem', color: '#0f172a' }}>{m.machine_or_line}</span>
+                      <span style={{ fontSize: '0.68rem', fontWeight: 800, color: m.achievement_pct >= 95 ? '#059669' : '#d97706' }}>{m.achievement_pct}%</span>
+                    </div>
+                    <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#2563eb', margin: '4px 0 2px' }}>
+                      {m.actual} <span style={{ fontSize: '0.7rem', color: '#64748b' }}>/ {m.target}</span>
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: '#64748b' }}>
+                      Downtime: {m.downtime}m
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 5. 7-DAY WEEKLY PRODUCTION TREND */}
+        {activeChartTab === 'weekly' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              Past 7-Day Factory Production Trend (Actual Output vs Target)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 10, alignItems: 'flex-end', minHeight: 180 }}>
+              {weeklyTrend.map((d, i) => {
+                const maxVal = Math.max(...weeklyTrend.map(x => Math.max(x.target, x.actual)), 100);
+                const actH = Math.max(8, Math.round((d.actual / maxVal) * 140));
+                const tgtH = Math.max(8, Math.round((d.target / maxVal) * 140));
+
+                return (
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                    <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#1e40af' }}>{d.actual}</div>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 140 }}>
+                      <div style={{ width: 10, height: tgtH, background: '#e2e8f0', borderRadius: '2px 2px 0 0' }} />
+                      <div style={{ width: 18, height: actH, background: '#2563eb', borderRadius: '3px 3px 0 0' }} />
+                    </div>
+                    <div style={{ fontSize: '0.74rem', fontWeight: 800, color: '#0f172a' }}>{d.day}</div>
+                    <div style={{ fontSize: '0.66rem', color: '#94a3b8' }}>{d.date.slice(5)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 6. 30-DAY MONTHLY TREND */}
+        {activeChartTab === 'monthly' && (
+          <div>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
+              30-Day Monthly Output Progression
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(30, 1fr)', gap: 3, alignItems: 'flex-end', minHeight: 140 }}>
+              {monthlyTrend.map((d, i) => {
+                const maxVal = Math.max(...monthlyTrend.map(x => Math.max(x.target, x.actual)), 100);
+                const actH = Math.max(4, Math.round((d.actual / maxVal) * 110));
+
+                return (
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                    <div
+                      title={`${d.date}: ${d.actual} pcs (Target: ${d.target})`}
+                      style={{
+                        width: '100%',
+                        height: actH,
+                        background: d.actual > 0 ? '#2563eb' : '#e2e8f0',
+                        borderRadius: '2px 2px 0 0'
+                      }}
+                    />
+                    <div style={{ fontSize: '0.55rem', color: '#94a3b8' }}>{d.day}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── RECENT PRODUCTION ENTRIES TABLE ── */}
+      <div style={{
+        background: '#ffffff',
+        borderRadius: 14,
+        border: '1px solid #e2e8f0',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+        overflow: 'hidden'
+      }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+              Recent Production Entries (Audit Feed)
+            </h3>
+            <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '2px 0 0' }}>
+              Live stream of newly recorded outputs from shopfloor operators & supervisors
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('standard-production')}
+            style={{
+              background: '#f1f5f9',
+              border: '1px solid #cbd5e1',
+              borderRadius: 6,
+              padding: '6px 12px',
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              color: '#1e40af',
+              cursor: 'pointer'
+            }}
+          >
+            View All Records →
           </button>
         </div>
 
+        {recentProd.length === 0 ? (
+          <div style={{ padding: '40px 20px', textAlign: 'center', color: '#94a3b8' }}>
+            <FileText size={32} color="#cbd5e1" style={{ margin: '0 auto 8px' }} />
+            <div style={{ fontWeight: 700, color: '#475569' }}>No production records entered yet.</div>
+            <div style={{ fontSize: '0.76rem', marginTop: 2 }}>Use Standard Production Entry or Hourly Production to record output.</div>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+              <thead>
+                <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>ID</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Date & Shift</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Line / Machine</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Interval</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Operator</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Target</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Actual Output</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Achievement</th>
+                  <th style={{ padding: '10px 16px', fontWeight: 800 }}>Downtime</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentProd.map((r) => {
+                  const ach = r.target_qty > 0 ? Math.round((r.actual_qty / r.target_qty) * 100) : 0;
+                  return (
+                    <tr key={r.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '10px 16px', color: '#64748b' }}>#{r.id}</td>
+                      <td style={{ padding: '10px 16px', fontWeight: 700, color: '#0f172a' }}>{r.date} ({r.shift})</td>
+                      <td style={{ padding: '10px 16px', fontWeight: 800, color: '#1e40af' }}>{r.machine_or_line}</td>
+                      <td style={{ padding: '10px 16px', color: '#475569' }}>{r.hour_interval}</td>
+                      <td style={{ padding: '10px 16px', color: '#334155' }}>{r.operator_name || '—'}</td>
+                      <td style={{ padding: '10px 16px', color: '#64748b' }}>{r.target_qty}</td>
+                      <td style={{ padding: '10px 16px', fontWeight: 800, color: '#0f172a' }}>{r.actual_qty}</td>
+                      <td style={{ padding: '10px 16px' }}>
+                        <span style={{
+                          padding: '2px 8px',
+                          borderRadius: 4,
+                          fontWeight: 800,
+                          fontSize: '0.72rem',
+                          background: ach >= 95 ? '#ecfdf5' : '#fffbeb',
+                          color: ach >= 95 ? '#059669' : '#d97706'
+                        }}>
+                          {ach}%
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 16px', color: r.downtime_minutes > 0 ? '#dc2626' : '#64748b' }}>
+                        {r.downtime_minutes > 0 ? `${r.downtime_minutes}m` : '0m'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* NOTIFICATIONS MODAL (Shared by Desktop & Mobile) */}
+      {/* In-App Notifications Modal */}
       <NotificationModal 
         isOpen={showNotificationModal}
         onClose={() => setShowNotificationModal(false)}
         notifications={notifications}
-        onClearAll={handleClearAllNotifications}
-        onDismiss={handleDismissNotification}
+        onDismiss={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
+        onClearAll={() => setNotifications([])}
+        setActiveTab={setActiveTab}
       />
-
     </div>
   );
 }

@@ -144,13 +144,6 @@ export const api = {
   createOvertime: (otData) => request('/overtime', { method: 'POST', body: JSON.stringify(otData) }),
   updateOvertimeStatus: (id, statusData) => request(`/overtime/${id}/status`, { method: 'PUT', body: JSON.stringify(statusData) }),
 
-  // Salary
-  getSalary: (params = {}) => {
-    const q = new URLSearchParams(params).toString();
-    return request(`/salary${q ? '?' + q : ''}`);
-  },
-  updateSalaryConfig: (empId, config) => request(`/salary/${empId}`, { method: 'PUT', body: JSON.stringify(config) }),
-
   // Machines
   getMachines: (type = '') => request(`/machines${type ? '?type=' + type : ''}`),
   createMachine: (machineData) => request('/machines', { method: 'POST', body: JSON.stringify(machineData) }),
@@ -197,9 +190,46 @@ export const api = {
   getSettings: () => request('/settings'),
   saveSettings: (settingsData) => request('/settings', { method: 'POST', body: JSON.stringify(settingsData) }),
 
+  // Production Records CRUD (Standard Production Entry)
+  getProductionRecords: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/production/records${q ? '?' + q : ''}`);
+  },
+  saveProductionRecord: (prodData) => request('/production/records', { method: 'POST', body: JSON.stringify(prodData) }),
+  updateProductionRecord: (recordId, prodData) => request(`/production/records/${recordId}`, { method: 'PUT', body: JSON.stringify(prodData) }),
+  deleteProductionRecord: (recordId) => request(`/production/records/${recordId}`, { method: 'DELETE' }),
+
+  // Activity Logs Audit Trail
+  getActivityLogs: () => request('/activity-logs'),
+  logActivity: (data) => request('/activity-logs', { method: 'POST', body: JSON.stringify(data) }),
+
+  // Machine Downtime Tracking
+  getMachineDowntime: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/machine-downtime${q ? '?' + q : ''}`);
+  },
+  saveMachineDowntime: (data) => request('/machine-downtime', { method: 'POST', body: JSON.stringify(data) }),
+  resolveMachineDowntime: (id, data = {}) => request(`/machine-downtime/${id}/resolve`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  // Dynamic In-App Notifications
+  getNotifications: () => request('/notifications'),
+
+  // Production Analytics
+  getAnalytics: (date, shift) => {
+    const params = new URLSearchParams();
+    if (date) params.append('date', date);
+    if (shift) params.append('shift', shift);
+    return request(`/analytics?${params.toString()}`);
+  },
+
+  // 11 Professional Factory Reports
+  getReportsData: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/reports/data${q ? '?' + q : ''}`);
+  },
+
   // Admin Data Management
   clearSampleData: (options = {}) => request('/admin/clear-sample-data', { method: 'POST', body: JSON.stringify(options) }),
-  deleteProductionRecord: (recordId) => request(`/production/records/${recordId}`, { method: 'DELETE' }),
 
   // Exports
   exportReport: async (type, date, shift) => {

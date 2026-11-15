@@ -21,7 +21,7 @@ export default function SettingsPage({ currentUser }) {
     shift_b_end: '01:00',
     shift_c_start: '01:00',
     shift_c_end: '08:00',
-    default_ot_multiplier: '1.5',
+    target_efficiency_threshold: '85',
     hours_per_shift: '8'
   });
 
@@ -243,13 +243,13 @@ export default function SettingsPage({ currentUser }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 10 }}>
             <div className="form-group">
-              <label className="form-label">Overtime Pay Rate Multiplier</label>
+              <label className="form-label">Target Efficiency Threshold (%)</label>
               <input
                 type="text"
                 className="form-input"
                 disabled={!isAdmin}
-                value={settings.default_ot_multiplier}
-                onChange={(e) => setSettings({ ...settings, default_ot_multiplier: e.target.value })}
+                value={settings.target_efficiency_threshold || '85'}
+                onChange={(e) => setSettings({ ...settings, target_efficiency_threshold: e.target.value })}
               />
             </div>
 
