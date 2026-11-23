@@ -202,11 +202,15 @@ export default function EmployeeManagement() {
     const isPresent = emp.status === 'Present' || emp.status === 'Active';
     const matchesStatus = statusFilter === 'All' || 
       (statusFilter === 'Present' && isPresent) ||
-      (statusFilter === 'Absent' && !isPresent);
+      (statusFilter === 'Absent' && emp.status === 'Absent') ||
+      (statusFilter === 'Active' && emp.status !== 'Inactive') ||
+      (statusFilter === 'Inactive' && emp.status === 'Inactive');
 
     return matchesSearch && matchesShift && matchesStatus;
   });
 
+  const presentCount = employees.filter(e => e.status === 'Present' || e.status === 'Active').length;
+  const absentCount = employees.filter(e => e.status === 'Absent').length;
   const activeCount = employees.filter(e => e.status !== 'Inactive').length;
   const inactiveCount = employees.filter(e => e.status === 'Inactive').length;
   const allocatedCount = employees.filter(e => e.assigned_machine && e.assigned_machine !== 'Not Allocated').length;
