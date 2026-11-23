@@ -19,7 +19,8 @@ import {
   Phone,
   Briefcase,
   Layers,
-  Clock
+  Clock,
+  Cpu
 } from 'lucide-react';
 import { api } from '../api';
 
