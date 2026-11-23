@@ -206,9 +206,10 @@ export default function EmployeeManagement() {
     return matchesSearch && matchesShift && matchesStatus;
   });
 
-  const presentCount = employees.filter(e => e.status === 'Present' || e.status === 'Active').length;
-  const absentCount = employees.length - presentCount;
-  const attendanceRate = employees.length > 0 ? ((presentCount / employees.length) * 100).toFixed(1) : '0';
+  const activeCount = employees.filter(e => e.status !== 'Inactive').length;
+  const inactiveCount = employees.filter(e => e.status === 'Inactive').length;
+  const allocatedCount = employees.filter(e => e.assigned_machine && e.assigned_machine !== 'Not Allocated').length;
+  const allocationRate = employees.length > 0 ? Math.round((allocatedCount / employees.length) * 100) : 0;
 
   const machineOptions = [
     ...Array.from({ length: 16 }, (_, i) => `NC-${String(i+1).padStart(2, '0')}`),
@@ -275,7 +276,7 @@ export default function EmployeeManagement() {
           </div>
         </div>
 
-        {/* Present Today */}
+        {/* Active Personnel */}
         <div style={{
           background: '#ffffff',
           borderRadius: 16,
@@ -288,13 +289,13 @@ export default function EmployeeManagement() {
         }}>
           <div>
             <div style={{ fontSize: '0.74rem', color: '#64748B', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Present Today
+              Active Personnel
             </div>
             <div style={{ fontSize: '1.75rem', fontWeight: 900, color: '#10B981', marginTop: 2 }}>
-              {presentCount}
+              {activeCount}
             </div>
             <div style={{ fontSize: '0.72rem', color: '#059669', fontWeight: 700, marginTop: 2 }}>
-              On Duty / Active
+              Available for Shifts
             </div>
           </div>
           <div style={{ width: 44, height: 44, borderRadius: 12, background: '#ECFDF5', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10B981' }}>
@@ -302,7 +303,7 @@ export default function EmployeeManagement() {
           </div>
         </div>
 
-        {/* Absent Today */}
+        {/* Inactive Records */}
         <div style={{
           background: '#ffffff',
           borderRadius: 16,
@@ -315,21 +316,21 @@ export default function EmployeeManagement() {
         }}>
           <div>
             <div style={{ fontSize: '0.74rem', color: '#64748B', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Absent Today
+              Inactive / Relieved
             </div>
-            <div style={{ fontSize: '1.75rem', fontWeight: 900, color: '#EF4444', marginTop: 2 }}>
-              {absentCount}
+            <div style={{ fontSize: '1.75rem', fontWeight: 900, color: inactiveCount > 0 ? '#EF4444' : '#64748B', marginTop: 2 }}>
+              {inactiveCount}
             </div>
-            <div style={{ fontSize: '0.72rem', color: '#DC2626', fontWeight: 700, marginTop: 2 }}>
-              Leave / Off-Shift
+            <div style={{ fontSize: '0.72rem', color: '#64748B', fontWeight: 700, marginTop: 2 }}>
+              Historical Records Saved
             </div>
           </div>
-          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#FEF2F2', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#EF4444' }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#F8FAFC', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B' }}>
             <AlertCircle size={22} />
           </div>
         </div>
 
-        {/* Attendance Rate */}
+        {/* Machine Assigned */}
         <div style={{
           background: '#ffffff',
           borderRadius: 16,
@@ -342,17 +343,17 @@ export default function EmployeeManagement() {
         }}>
           <div>
             <div style={{ fontSize: '0.74rem', color: '#64748B', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Attendance Rate
+              Machine Assigned
             </div>
             <div style={{ fontSize: '1.75rem', fontWeight: 900, color: '#3B82F6', marginTop: 2 }}>
-              {attendanceRate}%
+              {allocatedCount}
             </div>
             <div style={{ fontSize: '0.72rem', color: '#2563EB', fontWeight: 700, marginTop: 2 }}>
-              Target: 95.0%+
+              {allocationRate}% Fleet Allocated
             </div>
           </div>
-          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3B82F6' }}>
-            <TrendingUp size={22} />
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#2563EB' }}>
+            <Cpu size={22} />
           </div>
         </div>
       </div>

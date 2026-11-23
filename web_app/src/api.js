@@ -87,55 +87,96 @@ function getAuthHeader() {
 }
 
 // ============================================================================
-// PERSISTENT LOCAL STORAGE STORE (Guarantees zero data loss on refresh)
+// PERSISTENT LOCAL STORAGE STORE (Zero fake data, real calculations only)
 // ============================================================================
 
 const CACHE_KEY = 'pha_plant_data_store';
 
-const DEFAULT_MACHINES = [
-  { machine_number: 'NC-01', machine_type: 'NC', tonnage: 1000, production_target: 600, status: 'Running' },
-  { machine_number: 'NC-02', machine_type: 'NC', tonnage: 800,  production_target: 550, status: 'Running' },
-  { machine_number: 'NC-03', machine_type: 'NC', tonnage: 800,  production_target: 550, status: 'Running' },
-  { machine_number: 'NC-04', machine_type: 'NC', tonnage: 600,  production_target: 500, status: 'Running' },
-  { machine_number: 'NC-05', machine_type: 'NC', tonnage: 600,  production_target: 500, status: 'Running' },
-  { machine_number: 'NC-06', machine_type: 'NC', tonnage: 500,  production_target: 450, status: 'Running' },
-  { machine_number: 'NC-07', machine_type: 'NC', tonnage: 500,  production_target: 450, status: 'Running' },
-  { machine_number: 'NC-08', machine_type: 'NC', tonnage: 400,  production_target: 400, status: 'Running' },
-  { machine_number: 'NC-09', machine_type: 'NC', tonnage: 400,  production_target: 400, status: 'Running' },
-  { machine_number: 'NC-10', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running' },
-  { machine_number: 'NC-11', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running' },
-  { machine_number: 'NC-12', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running' },
-  { machine_number: 'NC-13', machine_type: 'NC', tonnage: 250,  production_target: 300, status: 'Running' },
-  { machine_number: 'NC-14', machine_type: 'NC', tonnage: 250,  production_target: 300, status: 'Running' },
-  { machine_number: 'NC-15', machine_type: 'NC', tonnage: 200,  production_target: 250, status: 'Running' },
-  { machine_number: 'NC-16', machine_type: 'NC', tonnage: 200,  production_target: 250, status: 'Running' },
-  { machine_number: 'LP-1', machine_type: 'Tandem', tonnage: 1200, production_target: 700, status: 'Running' },
-  { machine_number: 'LP-2', machine_type: 'Tandem', tonnage: 1000, production_target: 650, status: 'Running' },
-  { machine_number: 'HP-1', machine_type: 'Tandem', tonnage: 1500, production_target: 800, status: 'Running' },
-  { machine_number: 'HP-2', machine_type: 'Tandem', tonnage: 1500, production_target: 800, status: 'Running' },
-  { machine_number: 'HP-3', machine_type: 'Tandem', tonnage: 2000, production_target: 900, status: 'Running' },
-  { machine_number: 'HP-4', machine_type: 'Tandem', tonnage: 2000, production_target: 900, status: 'Running' }
+// 16 NC Presses + 6 Tandem Lines
+export const DEFAULT_MACHINES = [
+  { machine_number: 'NC-01', machine_type: 'NC', tonnage: 1000, production_target: 600, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-02', machine_type: 'NC', tonnage: 800,  production_target: 550, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-03', machine_type: 'NC', tonnage: 800,  production_target: 550, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-04', machine_type: 'NC', tonnage: 600,  production_target: 500, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-05', machine_type: 'NC', tonnage: 600,  production_target: 500, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-06', machine_type: 'NC', tonnage: 500,  production_target: 450, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-07', machine_type: 'NC', tonnage: 500,  production_target: 450, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-08', machine_type: 'NC', tonnage: 400,  production_target: 400, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-09', machine_type: 'NC', tonnage: 400,  production_target: 400, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-10', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-11', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-12', machine_type: 'NC', tonnage: 300,  production_target: 350, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-13', machine_type: 'NC', tonnage: 250,  production_target: 300, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-14', machine_type: 'NC', tonnage: 250,  production_target: 300, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-15', machine_type: 'NC', tonnage: 200,  production_target: 250, status: 'Running', assigned_operator: '' },
+  { machine_number: 'NC-16', machine_type: 'NC', tonnage: 200,  production_target: 250, status: 'Running', assigned_operator: '' },
+  { machine_number: 'LP-1', machine_type: 'Tandem', tonnage: 1200, production_target: 700, status: 'Running', assigned_operator: '' },
+  { machine_number: 'LP-2', machine_type: 'Tandem', tonnage: 1000, production_target: 650, status: 'Running', assigned_operator: '' },
+  { machine_number: 'HP-1', machine_type: 'Tandem', tonnage: 1500, production_target: 800, status: 'Running', assigned_operator: '' },
+  { machine_number: 'HP-2', machine_type: 'Tandem', tonnage: 1500, production_target: 800, status: 'Running', assigned_operator: '' },
+  { machine_number: 'HP-3', machine_type: 'Tandem', tonnage: 2000, production_target: 900, status: 'Running', assigned_operator: '' },
+  { machine_number: 'HP-4', machine_type: 'Tandem', tonnage: 2000, production_target: 900, status: 'Running', assigned_operator: '' }
 ];
 
-const DEFAULT_EMPLOYEES = [
-  { emp_id: 'PHA-001', name: 'R. Rajesh', department: 'Press Shop MFG-2', designation: 'Senior Line Operator', shift: 'Shift A', assigned_machine: 'NC-01', status: 'Active' },
-  { emp_id: 'PHA-002', name: 'M. Senthil', department: 'Press Shop MFG-2', designation: 'Press Operator', shift: 'Shift A', assigned_machine: 'NC-02', status: 'Active' },
-  { emp_id: 'PHA-003', name: 'K. Vijay', department: 'Press Shop MFG-2', designation: 'Line Operator', shift: 'Shift A', assigned_machine: 'NC-03', status: 'Active' },
-  { emp_id: 'PHA-004', name: 'S. Anand', department: 'Press Shop MFG-2', designation: 'Tandem Operator', shift: 'Shift A', assigned_machine: 'LP-1', status: 'Active' },
-  { emp_id: 'PHA-005', name: 'P. Karthik', department: 'Press Shop MFG-2', designation: 'Press Operator', shift: 'Shift B', assigned_machine: 'NC-04', status: 'Active' },
-  { emp_id: 'PHA-006', name: 'V. Murugan', department: 'Press Shop MFG-2', designation: 'Line Operator', shift: 'Shift B', assigned_machine: 'NC-05', status: 'Active' },
-  { emp_id: 'PHA-007', name: 'D. Suresh', department: 'Press Shop MFG-2', designation: 'Tandem Lead', shift: 'Shift B', assigned_machine: 'HP-1', status: 'Active' },
-  { emp_id: 'PHA-008', name: 'A. Manikandan', department: 'Press Shop MFG-2', designation: 'Maintenance Tech', shift: 'Shift C', assigned_machine: 'NC-06', status: 'Active' }
+// ZERO FAKE EMPLOYEES: Real user employees only
+export const DEFAULT_EMPLOYEES = [];
+
+// Sample fake employee names to actively purge from previous demo runs
+const FAKE_EMPLOYEE_NAMES = [
+  'R. Rajesh', 'M. Senthil', 'K. Vijay', 'S. Anand',
+  'P. Karthik', 'V. Murugan', 'D. Suresh', 'A. Manikandan'
 ];
 
-function getLocalStore() {
+function sanitizeStore(store) {
+  if (!store || typeof store !== 'object') store = {};
+
+  // Purge any fake seeded employees from old runs
+  if (Array.isArray(store.employees)) {
+    store.employees = store.employees.filter(
+      (e) => !FAKE_EMPLOYEE_NAMES.includes(e?.name)
+    );
+  } else {
+    store.employees = [];
+  }
+
+  // Ensure all 22 standard machines exist without duplicates
+  if (!Array.isArray(store.machines) || store.machines.length === 0) {
+    store.machines = DEFAULT_MACHINES;
+  } else {
+    // Merge default machine metadata if missing
+    const existingMap = new Map();
+    store.machines.forEach(m => existingMap.set(m.machine_number, m));
+    DEFAULT_MACHINES.forEach(dm => {
+      if (!existingMap.has(dm.machine_number)) {
+        existingMap.set(dm.machine_number, dm);
+      }
+    });
+    store.machines = Array.from(existingMap.values());
+  }
+
+  if (!Array.isArray(store.attendance)) store.attendance = [];
+  if (!Array.isArray(store.production_records)) store.production_records = [];
+  if (!Array.isArray(store.machine_plans)) store.machine_plans = [];
+  if (!Array.isArray(store.shift_handovers)) store.shift_handovers = [];
+  if (!Array.isArray(store.machine_downtime)) store.machine_downtime = [];
+  if (!Array.isArray(store.activity_logs)) store.activity_logs = [];
+
+  return store;
+}
+
+export function getLocalStore() {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const cleaned = sanitizeStore(parsed);
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cleaned));
+      return cleaned;
+    }
   } catch (e) {}
 
-  const initial = {
-    employees: DEFAULT_EMPLOYEES,
+  const initial = sanitizeStore({
+    employees: [],
     attendance: [],
     machines: DEFAULT_MACHINES,
     production_records: [],
@@ -148,7 +189,7 @@ function getLocalStore() {
         user_name: 'System',
         action: 'System Initialized',
         record_type: 'System',
-        details: 'Plant data storage ready with cloud sync',
+        details: 'Plant storage ready with verified calculations and zero fake data',
         created_at: new Date().toISOString()
       }
     ],
@@ -156,19 +197,21 @@ function getLocalStore() {
       plant_name: 'PHA INDIA PRIVATE LIMITED',
       location: 'Sriperumbudur Plant, Tamil Nadu',
       shift_timings: {
-        'Shift A': { start: '06:30', end: '15:00' },
-        'Shift B': { start: '15:00', end: '23:30' },
-        'Shift C': { start: '23:30', end: '06:30' }
+        'Shift A': { start: '08:00', end: '16:30' },
+        'Shift B': { start: '16:30', end: '01:00' },
+        'Shift C': { start: '01:00', end: '08:00' }
       }
     }
-  };
+  });
+
   localStorage.setItem(CACHE_KEY, JSON.stringify(initial));
   return initial;
 }
 
-function saveLocalStore(store) {
+export function saveLocalStore(store) {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(store));
+    const cleaned = sanitizeStore(store);
+    localStorage.setItem(CACHE_KEY, JSON.stringify(cleaned));
   } catch (e) {
     console.error('Failed to save to local cache:', e);
   }
@@ -220,14 +263,12 @@ async function request(endpoint, options = {}) {
 export const api = {
   // Compatibility & State
   getState: async () => {
-    // 1. Try Flask backend if configured
     try {
       const res = await request('/state');
       saveLocalStore(res);
       return res;
     } catch (e) {}
 
-    // 2. Try Supabase cloud state
     if (isSupabaseConfigured()) {
       try {
         const cloudState = await supabaseGetAppState();
@@ -238,7 +279,6 @@ export const api = {
       } catch (err) {}
     }
 
-    // 3. Persistent Local Store fallback
     return getLocalStore();
   },
 
@@ -296,7 +336,7 @@ export const api = {
   },
 
   // ==========================================================================
-  // DASHBOARD & KPIS (Calculated from cloud/local data with zero errors)
+  // DASHBOARD & KPIS: Verified Calculations with Live Output % for Each Machine
   // ==========================================================================
   getKpis: async (date, shift) => {
     try {
@@ -305,35 +345,120 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/dashboard/kpis?${params.toString()}`);
     } catch (e) {
-      // Calculate live KPIs directly from local/Supabase store
       const store = getLocalStore();
       const targetDate = date || new Date().toISOString().split('T')[0];
       const targetShift = shift || 'Shift A';
 
-      const recs = (store.production_records || []).filter(
+      // Real production records
+      const shiftRecords = (store.production_records || []).filter(
         (r) => r.date === targetDate && (!shift || r.shift === targetShift)
       );
+      const todayRecords = (store.production_records || []).filter((r) => r.date === targetDate);
 
-      const todayRecs = (store.production_records || []).filter((r) => r.date === targetDate);
+      // Shift aggregations
+      const shiftActual = shiftRecords.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const shiftGood = shiftRecords.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0) || shiftActual;
+      const shiftRej = shiftRecords.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+      const shiftDt = shiftRecords.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
 
-      const shiftActual = recs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
-      const shiftTarget = recs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0) || 5200;
-      const shiftGood = recs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0) || shiftActual;
-      const shiftRej = recs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
-      const shiftDt = recs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+      // Target for shift = sum of machine production targets (e.g. 16 NC + 6 Tandem)
+      const machines = store.machines || DEFAULT_MACHINES;
+      const shiftTarget = machines.reduce((sum, m) => sum + (Number(m.production_target) || 500), 0);
+      const shiftAchievePct = shiftTarget > 0 ? Math.round((shiftActual / shiftTarget) * 100) : 0;
 
-      const dayActual = todayRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0) || shiftActual;
-      const dayTarget = 15600;
+      // Full day aggregations (across all 3 shifts)
+      const dayActual = todayRecords.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const dayGood = todayRecords.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0) || dayActual;
+      const dayRej = todayRecords.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+      const dayTarget = shiftTarget * 3;
+      const dayAchievePct = dayTarget > 0 ? Math.round((dayActual / dayTarget) * 100) : 0;
 
-      const ncRecs = recs.filter((r) => r.production_type === 'NC' || r.machine_or_line?.startsWith('NC'));
-      const tanRecs = recs.filter((r) => r.production_type === 'Tandem' || !r.machine_or_line?.startsWith('NC'));
+      // NC vs Tandem shift splits
+      const ncRecs = shiftRecords.filter((r) => r.production_type === 'NC' || r.machine_or_line?.startsWith('NC'));
+      const tanRecs = shiftRecords.filter((r) => r.production_type === 'Tandem' || !r.machine_or_line?.startsWith('NC'));
 
+      const ncActual = ncRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const ncTarget = machines.filter(m => m.machine_type === 'NC').reduce((sum, m) => sum + (m.production_target || 500), 0);
+      const ncPct = ncTarget > 0 ? Math.round((ncActual / ncTarget) * 100) : 0;
+
+      const tanActual = tanRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const tanTarget = machines.filter(m => m.machine_type === 'Tandem').reduce((sum, m) => sum + (m.production_target || 700), 0);
+      const tanPct = tanTarget > 0 ? Math.round((tanActual / tanTarget) * 100) : 0;
+
+      // REAL MANPOWER & ATTENDANCE (Zero fake counts)
       const activeEmployees = (store.employees || []).filter((emp) => emp.status !== 'Inactive');
-      const presentCount = (store.attendance || []).filter(
-        (a) => a.date === targetDate && a.shift === targetShift && a.status === 'Present'
-      ).length || activeEmployees.length;
+      const shiftAttendance = (store.attendance || []).filter(
+        (a) => a.date === targetDate && a.shift === targetShift
+      );
+      const presentCount = shiftAttendance.filter((a) => a.status === 'Present' || a.status === 'On-Duty').length;
+      const absentCount = shiftAttendance.filter((a) => a.status === 'Absent').length;
+      const leaveCount = shiftAttendance.filter((a) => a.status === 'Leave' || a.status === 'Half-day').length;
 
-      const runningCount = (store.machines || []).filter((m) => m.status === 'Running').length || 22;
+      const runningCount = machines.filter((m) => m.status === 'Running').length;
+      const stoppedCount = machines.length - runningCount;
+
+      // INDIVIDUAL MACHINE PERFORMANCE & OUTPUT PERCENTAGES
+      const machinePerf = machines.map((m) => {
+        const mRecs = shiftRecords.filter(
+          (r) => r.machine_or_line === m.machine_number || r.machine === m.machine_number
+        );
+        const actual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+        const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
+        const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+        const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+        const target = Number(m.production_target) || 500;
+        const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
+
+        return {
+          machine_or_line: m.machine_number,
+          machine: m.machine_number,
+          machine_number: m.machine_number,
+          type: m.machine_type,
+          target,
+          actual,
+          good,
+          rejected: rej,
+          downtime: dt,
+          achievement_pct: pct,
+          pct,
+          status: m.status || 'Running',
+          operator: m.assigned_operator || ''
+        };
+      });
+
+      // Best and Lowest performing machines
+      const activeMachinesWithOutput = machinePerf.filter(m => m.actual > 0);
+      const bestMach = activeMachinesWithOutput.length > 0
+        ? [...activeMachinesWithOutput].sort((a, b) => b.achievement_pct - a.achievement_pct)[0]
+        : null;
+      const lowestMach = activeMachinesWithOutput.length > 0
+        ? [...activeMachinesWithOutput].sort((a, b) => a.achievement_pct - b.achievement_pct)[0]
+        : null;
+
+      // Hourly breakdown curve (8 intervals)
+      const hourSlots = [
+        '08:00 - 09:00', '09:00 - 10:00', '10:00 - 11:00', '11:00 - 12:00',
+        '12:00 - 13:00', '13:00 - 14:00', '14:00 - 15:00', '15:00 - 16:30'
+      ];
+      const hourlyBreakdown = hourSlots.map((slot, idx) => {
+        const slotRecs = shiftRecords.filter(r => r.hour_interval?.includes(slot) || r.hour_interval?.includes(`Hour ${idx + 1}`));
+        const slotActual = slotRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+        const slotTarget = Math.round(shiftTarget / 8);
+        return {
+          hour: slot.split(' - ')[0],
+          interval: slot,
+          actual: slotActual,
+          target: slotTarget,
+          pct: slotTarget > 0 ? Math.round((slotActual / slotTarget) * 100) : 0
+        };
+      });
+
+      // Shift comparison (A vs B vs C for today)
+      const shiftBreakdown = {
+        'Shift A': todayRecords.filter(r => r.shift === 'Shift A').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0),
+        'Shift B': todayRecords.filter(r => r.shift === 'Shift B').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0),
+        'Shift C': todayRecords.filter(r => r.shift === 'Shift C').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0)
+      };
 
       return {
         date: targetDate,
@@ -341,15 +466,19 @@ export const api = {
         kpi_cards: {
           today_total_production: dayActual,
           shift_production: shiftActual,
-          running_machines: runningCount,
-          total_machines: (store.machines || []).length || 22,
-          stopped_machines: ((store.machines || []).length || 22) - runningCount,
+          shift_achievement_percent: shiftAchievePct,
+          day_achievement_percent: dayAchievePct,
+          nc_production: ncActual,
+          tandem_production: tanActual,
+          total_manpower: activeEmployees.length,
           active_manpower: presentCount,
-          total_manpower: activeEmployees.length || 8,
+          present_employees: presentCount,
+          absent_employees: absentCount,
+          running_machines: runningCount,
+          stopped_machines: stoppedCount,
           shift_downtime_minutes: shiftDt,
-          rejection_count: shiftRej,
-          shift_achievement_percent: shiftTarget > 0 ? Math.round((shiftActual / shiftTarget) * 100) : 0,
-          day_achievement_percent: dayTarget > 0 ? Math.round((dayActual / dayTarget) * 100) : 0
+          total_downtime: shiftDt,
+          rejection_count: shiftRej
         },
         shift_production: {
           target: shiftTarget,
@@ -357,38 +486,49 @@ export const api = {
           good: shiftGood,
           rejected: shiftRej,
           downtime_minutes: shiftDt,
-          achievement_pct: shiftTarget > 0 ? Math.round((shiftActual / shiftTarget) * 100) : 0
+          achievement_pct: shiftAchievePct,
+          rejection_pct: shiftActual > 0 ? ((shiftRej / shiftActual) * 100).toFixed(1) : 0
         },
         day_production: {
           target: dayTarget,
           actual: dayActual,
-          good: dayActual - shiftRej,
-          rejected: shiftRej,
-          achievement_pct: Math.round((dayActual / dayTarget) * 100)
+          good: dayGood,
+          rejected: dayRej,
+          achievement_pct: dayAchievePct
         },
         nc_summary: {
-          target: 2800,
-          actual: ncRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0),
-          achievement_pct: 0
+          target: ncTarget,
+          actual: ncActual,
+          good: ncRecs.reduce((s, r) => s + (Number(r.good_qty) || 0), 0),
+          rejected: ncRecs.reduce((s, r) => s + (Number(r.rejected_qty) || 0), 0),
+          downtime: ncRecs.reduce((s, r) => s + (Number(r.downtime_minutes) || 0), 0),
+          achievement_pct: ncPct
         },
         tandem_summary: {
-          target: 2400,
-          actual: tanRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0),
-          achievement_pct: 0
+          target: tanTarget,
+          actual: tanActual,
+          good: tanRecs.reduce((s, r) => s + (Number(r.good_qty) || 0), 0),
+          rejected: tanRecs.reduce((s, r) => s + (Number(r.rejected_qty) || 0), 0),
+          downtime: tanRecs.reduce((s, r) => s + (Number(r.downtime_minutes) || 0), 0),
+          achievement_pct: tanPct
         },
-        hourly_breakdown: [],
-        machine_performance: (store.machines || []).map((m) => ({
-          machine: m.machine_number,
-          type: m.machine_type,
-          target: m.production_target || 500,
-          actual: 0,
-          status: m.status || 'Running',
-          pct: 0
-        }))
+        total_employees: activeEmployees.length,
+        employees_present: presentCount,
+        employees_absent: absentCount,
+        employees_on_leave: leaveCount,
+        hourly_breakdown: hourlyBreakdown,
+        shift_breakdown: shiftBreakdown,
+        machine_performance: machinePerf,
+        best_machine: bestMach,
+        lowest_machine: lowestMach,
+        recent_production: shiftRecords.slice(0, 10)
       };
     }
   },
 
+  // ==========================================================================
+  // CELL STATUS: OEE and Output Percentages for Each Machine
+  // ==========================================================================
   getCellStatus: async (date, shift, type = 'ALL') => {
     try {
       const params = new URLSearchParams();
@@ -398,26 +538,224 @@ export const api = {
       return await request(`/dashboard/cell-status?${params.toString()}`);
     } catch (e) {
       const store = getLocalStore();
-      const machines = (store.machines || []).filter(
+      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetShift = shift || 'Shift A';
+
+      const shiftRecs = (store.production_records || []).filter(
+        (r) => r.date === targetDate && (!shift || r.shift === targetShift)
+      );
+
+      const allMachines = store.machines || DEFAULT_MACHINES;
+      const filtered = allMachines.filter(
         (m) => type === 'ALL' || m.machine_type === type
       );
-      return {
-        cells: machines.map((m) => ({
+
+      const machines = filtered.map((m) => {
+        const mRecs = shiftRecs.filter(
+          (r) => r.machine_or_line === m.machine_number || r.machine === m.machine_number
+        );
+        const actual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+        const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
+        const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+        const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+        const target = Number(m.production_target) || 500;
+        const perf = target > 0 ? Math.round((actual / target) * 100) : 0;
+        const qual = actual > 0 ? Math.round(((actual - rej) / actual) * 100) : 100;
+        const avail = m.status === 'Running' ? 100 : (m.status === 'Maintenance' ? 60 : 0);
+        const oee = Math.round((perf * (qual / 100) * (avail / 100)));
+
+        return {
           machine_number: m.machine_number,
           machine_type: m.machine_type,
-          tonnage: m.tonnage,
-          target: m.production_target || 500,
-          actual: 0,
+          tonnage: m.tonnage || 0,
+          target: target,
+          actual: actual,
+          good: good,
+          rejected: rej,
+          downtime: dt,
           status: m.status || 'Running',
-          operator: m.assigned_operator || '',
-          achievement_pct: 0
-        }))
+          operator: m.assigned_operator || 'Line Operator',
+          achievement_pct: perf,
+          performance: perf,
+          quality: qual,
+          availability: avail,
+          oee: oee
+        };
+      });
+
+      const ticker = machines.map((m) => ({
+        name: m.machine_number,
+        pct: `${m.performance}%`,
+        status: m.performance >= 85 ? 'green' : m.performance >= 70 ? 'yellow' : m.performance > 0 ? 'red' : 'gray'
+      }));
+
+      // Downtime Pareto
+      const dtReasons = {};
+      shiftRecs.forEach((r) => {
+        if (r.downtime_minutes > 0) {
+          const reason = r.downtime_reason || 'General Downtime';
+          dtReasons[reason] = (dtReasons[reason] || 0) + Number(r.downtime_minutes);
+        }
+      });
+      const downtime_pareto = Object.entries(dtReasons).map(([reason, minutes]) => ({
+        reason,
+        minutes
+      }));
+
+      return {
+        machines,
+        cells: machines,
+        ticker,
+        downtime_pareto
       };
     }
   },
 
   // ==========================================================================
-  // EMPLOYEES
+  // NC PRODUCTION (16 Dedicated Positions) with Output Percentages
+  // ==========================================================================
+  getNcProduction: async (date, shift) => {
+    try {
+      const params = new URLSearchParams();
+      if (date) params.append('date', date);
+      if (shift) params.append('shift', shift);
+      return await request(`/production/nc?${params.toString()}`);
+    } catch (e) {
+      const store = getLocalStore();
+      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetShift = shift || 'Shift A';
+
+      const ncRecords = (store.production_records || []).filter(
+        (r) =>
+          r.date === targetDate &&
+          (!shift || r.shift === targetShift) &&
+          (r.production_type === 'NC' || r.machine_or_line?.startsWith('NC'))
+      );
+
+      const ncDefs = (store.machines || DEFAULT_MACHINES).filter(m => m.machine_type === 'NC');
+
+      const machine_matrix = ncDefs.map((m) => {
+        const mRecs = ncRecords.filter(r => r.machine_or_line === m.machine_number);
+        const actual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+        const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
+        const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+        const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+        const target = Number(m.production_target) || 500;
+        const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
+
+        return {
+          machine_number: m.machine_number,
+          machine_type: 'NC',
+          tonnage: m.tonnage || 0,
+          production_target: target,
+          actual_production: actual,
+          good_parts: good,
+          rejection_count: rej,
+          downtime_minutes: dt,
+          achievement_pct: pct,
+          status: m.status || 'Running',
+          operator: m.assigned_operator || ''
+        };
+      });
+
+      const totalTarget = machine_matrix.reduce((s, m) => s + m.production_target, 0);
+      const totalActual = machine_matrix.reduce((s, m) => s + m.actual_production, 0);
+      const totalGood = machine_matrix.reduce((s, m) => s + m.good_parts, 0);
+      const totalRej = machine_matrix.reduce((s, m) => s + m.rejection_count, 0);
+      const totalDt = machine_matrix.reduce((s, m) => s + m.downtime_minutes, 0);
+      const achievePct = totalTarget > 0 ? Math.round((totalActual / totalTarget) * 100) : 0;
+
+      return {
+        machine_matrix,
+        total_target: totalTarget,
+        total_actual: totalActual,
+        total_good: totalGood,
+        total_rejected: totalRej,
+        total_downtime: totalDt,
+        achievement_pct: achievePct,
+        records: ncRecords
+      };
+    }
+  },
+
+  saveNcProduction: async (prodData) => {
+    return api.saveProductionRecord({ ...prodData, production_type: 'NC' });
+  },
+
+  // ==========================================================================
+  // TANDEM PRODUCTION (6 Dedicated Lines) with Output Percentages
+  // ==========================================================================
+  getTandemProduction: async (date, shift) => {
+    try {
+      const params = new URLSearchParams();
+      if (date) params.append('date', date);
+      if (shift) params.append('shift', shift);
+      return await request(`/production/tandem?${params.toString()}`);
+    } catch (e) {
+      const store = getLocalStore();
+      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetShift = shift || 'Shift A';
+
+      const tanRecords = (store.production_records || []).filter(
+        (r) =>
+          r.date === targetDate &&
+          (!shift || r.shift === targetShift) &&
+          (r.production_type === 'Tandem' || !r.machine_or_line?.startsWith('NC'))
+      );
+
+      const tanDefs = (store.machines || DEFAULT_MACHINES).filter(m => m.machine_type === 'Tandem');
+
+      const line_matrix = tanDefs.map((m) => {
+        const mRecs = tanRecords.filter(r => r.machine_or_line === m.machine_number);
+        const actual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+        const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
+        const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+        const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+        const target = Number(m.production_target) || 700;
+        const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
+
+        return {
+          line_id: m.machine_number,
+          machine_number: m.machine_number,
+          machine_type: 'Tandem',
+          tonnage: m.tonnage || 0,
+          production_target: target,
+          actual_production: actual,
+          good_parts: good,
+          rejection_count: rej,
+          downtime_minutes: dt,
+          achievement_pct: pct,
+          status: m.status || 'Running',
+          operator: m.assigned_operator || ''
+        };
+      });
+
+      const totalTarget = line_matrix.reduce((s, m) => s + m.production_target, 0);
+      const totalActual = line_matrix.reduce((s, m) => s + m.actual_production, 0);
+      const totalGood = line_matrix.reduce((s, m) => s + m.good_parts, 0);
+      const totalRej = line_matrix.reduce((s, m) => s + m.rejection_count, 0);
+      const totalDt = line_matrix.reduce((s, m) => s + m.downtime_minutes, 0);
+      const achievePct = totalTarget > 0 ? Math.round((totalActual / totalTarget) * 100) : 0;
+
+      return {
+        line_matrix,
+        total_target: totalTarget,
+        total_actual: totalActual,
+        total_good: totalGood,
+        total_rejected: totalRej,
+        total_downtime: totalDt,
+        achievement_pct: achievePct,
+        records: tanRecords
+      };
+    }
+  },
+
+  saveTandemProduction: async (prodData) => {
+    return api.saveProductionRecord({ ...prodData, production_type: 'Tandem' });
+  },
+
+  // ==========================================================================
+  // EMPLOYEES: Real Employees Only (Zero Fake Data)
   // ==========================================================================
   getEmployees: async (params = {}) => {
     try {
@@ -426,15 +764,16 @@ export const api = {
     } catch (e) {
       if (isSupabaseConfigured()) {
         const cloud = await supabaseGetEmployees();
-        if (cloud && cloud.length > 0) {
+        if (cloud) {
           const store = getLocalStore();
-          store.employees = cloud;
+          store.employees = cloud.filter(e => !FAKE_EMPLOYEE_NAMES.includes(e?.name));
           saveLocalStore(store);
-          return { employees: cloud, total: cloud.length };
+          return { employees: store.employees, total: store.employees.length };
         }
       }
       const store = getLocalStore();
-      return { employees: store.employees || [], total: (store.employees || []).length };
+      const employees = (store.employees || []).filter(e => !FAKE_EMPLOYEE_NAMES.includes(e?.name));
+      return { employees, total: employees.length };
     }
   },
 
@@ -443,6 +782,7 @@ export const api = {
     const newEmp = {
       ...empData,
       id: Date.now(),
+      status: empData.status || 'Active',
       created_at: new Date().toISOString()
     };
     store.employees = [...(store.employees || []), newEmp];
@@ -507,22 +847,38 @@ export const api = {
   },
 
   // ==========================================================================
-  // ATTENDANCE
+  // ATTENDANCE: Real Roster with Zero Fake Percentages
   // ==========================================================================
   getAttendance: async (params = {}) => {
     try {
       const q = new URLSearchParams(params).toString();
-      return await request(`/attendance${q ? '?' + q : ''}`);
+      const res = await request(`/attendance${q ? '?' + q : ''}`);
+      return res;
     } catch (e) {
-      if (isSupabaseConfigured()) {
-        const cloud = await supabaseGetAttendance(params.date, params.shift);
-        if (cloud) return { attendance: cloud };
-      }
       const store = getLocalStore();
       let records = store.attendance || [];
       if (params.date) records = records.filter((r) => r.date === params.date);
       if (params.shift) records = records.filter((r) => r.shift === params.shift);
-      return { attendance: records };
+
+      // Build real roster matching registered active employees
+      const activeEmployees = (store.employees || []).filter(e => e.status !== 'Inactive' && !FAKE_EMPLOYEE_NAMES.includes(e?.name));
+      const recordMap = new Map();
+      records.forEach(r => recordMap.set(r.emp_id, r.status));
+
+      const roster = activeEmployees.map(emp => ({
+        emp_id: emp.emp_id,
+        name: emp.name,
+        department: emp.department || 'Press Shop MFG-2',
+        designation: emp.designation || 'Operator',
+        assigned_machine: emp.assigned_machine || '',
+        shift: emp.shift || params.shift || 'Shift A',
+        status: recordMap.get(emp.emp_id) || 'Present'
+      }));
+
+      return {
+        attendance: records,
+        roster: roster
+      };
     }
   },
 
@@ -566,7 +922,7 @@ export const api = {
         if (cloud && cloud.length > 0) return { machines: cloud };
       }
       const store = getLocalStore();
-      const machines = (store.machines || []).filter(
+      const machines = (store.machines || DEFAULT_MACHINES).filter(
         (m) => !type || m.machine_type === type
       );
       return { machines };
@@ -575,7 +931,7 @@ export const api = {
 
   createMachine: async (machineData) => {
     const store = getLocalStore();
-    store.machines = [...(store.machines || []), machineData];
+    store.machines = [...(store.machines || DEFAULT_MACHINES), machineData];
     saveLocalStore(store);
     triggerCloudSync();
 
@@ -592,7 +948,7 @@ export const api = {
 
   updateMachine: async (machineNumber, machineData) => {
     const store = getLocalStore();
-    store.machines = (store.machines || []).map((m) =>
+    store.machines = (store.machines || DEFAULT_MACHINES).map((m) =>
       m.machine_number === machineNumber ? { ...m, ...machineData } : m
     );
     saveLocalStore(store);
@@ -611,7 +967,7 @@ export const api = {
 
   deleteMachine: async (machineNumber) => {
     const store = getLocalStore();
-    store.machines = (store.machines || []).filter((m) => m.machine_number !== machineNumber);
+    store.machines = (store.machines || DEFAULT_MACHINES).filter((m) => m.machine_number !== machineNumber);
     saveLocalStore(store);
     triggerCloudSync();
 
@@ -677,6 +1033,14 @@ export const api = {
       let records = store.production_records || [];
       if (params.date) records = records.filter((r) => r.date === params.date);
       if (params.shift) records = records.filter((r) => r.shift === params.shift);
+      if (params.machine || params.machine_or_line) {
+        const targetM = params.machine || params.machine_or_line;
+        records = records.filter((r) => r.machine_or_line === targetM);
+      }
+      if (params.type || params.production_type) {
+        const targetT = params.type || params.production_type;
+        records = records.filter((r) => r.production_type === targetT);
+      }
       return { records, total: records.length };
     }
   },
@@ -748,58 +1112,23 @@ export const api = {
   },
 
   saveHourlyProduction: async (prodData) => {
-    const store = getLocalStore();
-    const rec = { ...prodData, id: Date.now(), created_at: new Date().toISOString() };
-    store.production_records = [rec, ...(store.production_records || [])];
-    saveLocalStore(store);
-    triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveProductionRecord(rec).catch(console.warn);
-    }
-
-    try {
-      return await request('/production/hourly', { method: 'POST', body: JSON.stringify(prodData) });
-    } catch (e) {
-      return { status: 'success', record: rec };
-    }
-  },
-
-  getNcProduction: async (date, shift) => {
-    try {
-      const params = new URLSearchParams();
-      if (date) params.append('date', date);
-      if (shift) params.append('shift', shift);
-      return await request(`/production/nc?${params.toString()}`);
-    } catch (e) {
-      return { records: [] };
-    }
-  },
-
-  saveNcProduction: async (prodData) => {
-    return api.saveProductionRecord({ ...prodData, production_type: 'NC' });
-  },
-
-  getTandemProduction: async (date, shift) => {
-    try {
-      const params = new URLSearchParams();
-      if (date) params.append('date', date);
-      if (shift) params.append('shift', shift);
-      return await request(`/production/tandem?${params.toString()}`);
-    } catch (e) {
-      return { records: [] };
-    }
-  },
-
-  saveTandemProduction: async (prodData) => {
-    return api.saveProductionRecord({ ...prodData, production_type: 'Tandem' });
+    return api.saveProductionRecord(prodData);
   },
 
   getShiftComparison: async (date) => {
     try {
       return await request(`/production/shift-comparison?date=${date}`);
     } catch (e) {
-      return { shifts: { 'Shift A': 0, 'Shift B': 0, 'Shift C': 0 } };
+      const store = getLocalStore();
+      const targetDate = date || new Date().toISOString().split('T')[0];
+      const todayRecs = (store.production_records || []).filter(r => r.date === targetDate);
+      return {
+        shifts: {
+          'Shift A': todayRecs.filter(r => r.shift === 'Shift A').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0),
+          'Shift B': todayRecs.filter(r => r.shift === 'Shift B').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0),
+          'Shift C': todayRecs.filter(r => r.shift === 'Shift C').reduce((s, r) => s + (Number(r.actual_qty) || 0), 0)
+        }
+      };
     }
   },
 
@@ -963,10 +1292,10 @@ export const api = {
           {
             id: 'n-cloud',
             type: 'info',
-            title: isSupabaseConfigured() ? 'Cloud Sync Active' : 'Offline / Local Persistence',
+            title: isSupabaseConfigured() ? 'Cloud Database Connected' : 'Local Storage Mode',
             message: isSupabaseConfigured()
-              ? 'Connected to Supabase. Data is backed up to the cloud.'
-              : 'Plant data is saved in local browser storage. Connect Supabase to enable multi-device sync.',
+              ? 'Connected to Supabase. Plant data is safely backed up to the cloud.'
+              : 'Plant data is stored locally in your browser. Connect Supabase to sync across devices.',
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           }
         ]
@@ -982,10 +1311,18 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/analytics?${params.toString()}`);
     } catch (e) {
+      const store = getLocalStore();
+      const targetDate = date || new Date().toISOString().split('T')[0];
+      const todayRecs = (store.production_records || []).filter(r => r.date === targetDate);
+      const totalActual = todayRecs.reduce((s, r) => s + (Number(r.actual_qty) || 0), 0);
+      const totalGood = todayRecs.reduce((s, r) => s + (Number(r.good_qty) || 0), 0) || totalActual;
+      const totalRej = todayRecs.reduce((s, r) => s + (Number(r.rejected_qty) || 0), 0);
+      const totalDt = todayRecs.reduce((s, r) => s + (Number(r.downtime_minutes) || 0), 0);
+
       return {
-        efficiency: 85,
-        scrap_rate: 1.2,
-        downtime_hours: 0.5,
+        efficiency: totalActual > 0 ? Math.min(100, Math.round((totalGood / (totalActual || 1)) * 100)) : 0,
+        scrap_rate: totalActual > 0 ? Number(((totalRej / totalActual) * 100).toFixed(1)) : 0,
+        downtime_hours: Number((totalDt / 60).toFixed(1)),
         top_performers: []
       };
     }
@@ -1000,7 +1337,7 @@ export const api = {
       return {
         records: store.production_records || [],
         attendance: store.attendance || [],
-        machines: store.machines || []
+        machines: store.machines || DEFAULT_MACHINES
       };
     }
   },
@@ -1055,8 +1392,14 @@ export const api = {
   },
 
   clearSampleData: async () => {
-    localStorage.removeItem(CACHE_KEY);
-    return { status: 'success', message: 'Local storage reset' };
+    const store = getLocalStore();
+    store.employees = (store.employees || []).filter(e => !FAKE_EMPLOYEE_NAMES.includes(e?.name));
+    store.production_records = [];
+    store.attendance = [];
+    store.shift_handovers = [];
+    store.machine_downtime = [];
+    saveLocalStore(store);
+    return { status: 'success', message: 'Sample and test data cleared. Real employee records and machine configurations preserved.' };
   },
 
   exportReport: async (type, date, shift) => {
@@ -1066,7 +1409,6 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/reports/export?${params.toString()}`, { asBlob: true });
     } catch (e) {
-      // Fallback client-side CSV blob
       const csvContent = 'Date,Shift,Machine,Actual,Target\n';
       return new Blob([csvContent], { type: 'text/csv' });
     }

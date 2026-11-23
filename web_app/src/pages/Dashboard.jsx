@@ -458,93 +458,69 @@ export default function Dashboard({ selectedDate, selectedShift = 'Shift A', set
         </div>
       </div>
 
-      {/* ── PERFORMANCE HIGHLIGHT SUMMARY STRIP ── */}
+      {/* ── TOP & LOWEST PERFORMING MACHINES SPOTLIGHT ── */}
       <div style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
         gap: 14,
         marginBottom: 24
       }}>
-        {/* Today's Summary */}
-        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>
-            Today's Production Summary
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontSize: '1.35rem', fontWeight: 900, color: '#0f172a' }}>
-                {(dp.actual ?? 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>/ {(dp.target ?? 0).toLocaleString()}</span>
-              </div>
-              <div style={{ fontSize: '0.74rem', color: '#059669', fontWeight: 700, marginTop: 2 }}>
-                {dp.achievement_pct ?? 0}% Full Day Achievement
-              </div>
-            </div>
-            <div style={{ width: 70, height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
-              <div style={{ width: `${Math.min(100, dp.achievement_pct ?? 0)}%`, height: '100%', background: '#2563eb' }} />
-            </div>
-          </div>
-        </div>
-
-        {/* Current Shift Summary */}
-        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>
-            {selectedShift} Summary
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontSize: '1.35rem', fontWeight: 900, color: '#0f172a' }}>
-                {(sp.actual ?? 0).toLocaleString()} <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600 }}>/ {(sp.target ?? 0).toLocaleString()}</span>
-              </div>
-              <div style={{ fontSize: '0.74rem', color: (sp.actual ?? 0) >= (sp.target ?? 0) ? '#059669' : '#d97706', fontWeight: 700, marginTop: 2 }}>
-                {(sp.good ?? 0).toLocaleString()} Good • {(sp.rejected ?? 0).toLocaleString()} Scrap ({sp.rejection_pct ?? 0}%)
-              </div>
-            </div>
-            <div style={{ width: 70, height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
-              <div style={{ width: `${Math.min(100, sp.achievement_pct ?? 0)}%`, height: '100%', background: '#10b981' }} />
-            </div>
-          </div>
-        </div>
-
         {/* Best Performing Machine */}
-        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #bbf7d0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
           <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#059669', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <TrendingUp size={13} />
-            <span>Top Performing Machine</span>
+            <TrendingUp size={14} />
+            <span>Top Performing Machine Today</span>
           </div>
-          {bestMach ? (
+          {bestMach && bestMach.actual > 0 ? (
             <div>
-              <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#0f172a' }}>
-                {bestMach.machine_or_line} <span style={{ fontSize: '0.75rem', color: '#059669', fontWeight: 800 }}>({bestMach.achievement_pct}% Target)</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0f172a' }}>
+                  {bestMach.machine_or_line || bestMach.machine}
+                </div>
+                <span style={{ fontSize: '0.8rem', color: '#059669', fontWeight: 900, background: '#ecfdf5', padding: '3px 8px', borderRadius: 6 }}>
+                  {bestMach.achievement_pct ?? bestMach.pct ?? 0}% Output
+                </span>
               </div>
-              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
-                {bestMach.actual} pcs produced • {bestMach.downtime}m downtime
+              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 4 }}>
+                {bestMach.actual.toLocaleString()} produced / {bestMach.target.toLocaleString()} target • {bestMach.downtime || 0}m downtime
+              </div>
+              <div style={{ width: '100%', height: 6, background: '#e2e8f0', borderRadius: 3, marginTop: 8, overflow: 'hidden' }}>
+                <div style={{ width: `${Math.min(100, bestMach.achievement_pct ?? bestMach.pct ?? 0)}%`, height: '100%', background: '#059669' }} />
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
-              No production logged yet today
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic', padding: '6px 0' }}>
+              No machine output recorded yet today.
             </div>
           )}
         </div>
 
         {/* Lowest Performing Machine */}
-        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#dc2626', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <TrendingDown size={13} />
-            <span>Lowest Performing Machine</span>
+        <div style={{ background: '#ffffff', borderRadius: 12, padding: '16px 20px', border: '1px solid #fed7aa', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#ea580c', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <TrendingDown size={14} />
+            <span>Bottleneck / Low Output Alert</span>
           </div>
           {lowestMach && lowestMach.actual > 0 ? (
             <div>
-              <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#0f172a' }}>
-                {lowestMach.machine_or_line} <span style={{ fontSize: '0.75rem', color: '#dc2626', fontWeight: 800 }}>({lowestMach.achievement_pct}% Target)</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0f172a' }}>
+                  {lowestMach.machine_or_line || lowestMach.machine}
+                </div>
+                <span style={{ fontSize: '0.8rem', color: '#ea580c', fontWeight: 900, background: '#fff7ed', padding: '3px 8px', borderRadius: 6 }}>
+                  {lowestMach.achievement_pct ?? lowestMach.pct ?? 0}% Output
+                </span>
               </div>
-              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 2 }}>
-                {lowestMach.actual} pcs produced • {lowestMach.downtime}m downtime
+              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: 4 }}>
+                {lowestMach.actual.toLocaleString()} produced / {lowestMach.target.toLocaleString()} target • {lowestMach.downtime || 0}m downtime
+              </div>
+              <div style={{ width: '100%', height: 6, background: '#e2e8f0', borderRadius: 3, marginTop: 8, overflow: 'hidden' }}>
+                <div style={{ width: `${Math.min(100, lowestMach.achievement_pct ?? lowestMach.pct ?? 0)}%`, height: '100%', background: '#ea580c' }} />
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
-              All machines operating within normal limits
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic', padding: '6px 0' }}>
+              All machines operating within normal limits.
             </div>
           )}
         </div>
@@ -748,29 +724,57 @@ export default function Dashboard({ selectedDate, selectedShift = 'Shift A', set
         {/* 4. MACHINE-WISE PRODUCTION */}
         {activeChartTab === 'machines' && (
           <div>
-            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: 14 }}>
-              Active Machines Production & Target Output Today
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#475569' }}>
+                All 22 Shopfloor Machines — Live Output Percentages & Targets
+              </div>
+              <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                16 NC Presses • 6 Tandem Lines
+              </span>
             </div>
             {machinePerf.length === 0 ? (
               <div style={{ padding: '30px 20px', textAlign: 'center', color: '#94a3b8' }}>
-                No machine-specific output recorded yet for today.
+                No machines configured yet.
               </div>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
-                {machinePerf.map((m, i) => (
-                  <div key={i} style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontWeight: 800, fontSize: '0.85rem', color: '#0f172a' }}>{m.machine_or_line}</span>
-                      <span style={{ fontSize: '0.68rem', fontWeight: 800, color: m.achievement_pct >= 95 ? '#059669' : '#d97706' }}>{m.achievement_pct}%</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 12 }}>
+                {machinePerf.map((m, i) => {
+                  const mName = m.machine_or_line || m.machine || m.machine_number;
+                  const pct = m.achievement_pct ?? m.pct ?? (m.target > 0 ? Math.round((m.actual / m.target) * 100) : 0);
+                  const isNc = mName.startsWith('NC') || m.type === 'NC';
+                  const pctColor = pct >= 90 ? '#059669' : pct >= 70 ? '#d97706' : pct > 0 ? '#dc2626' : '#64748b';
+                  const pctBg = pct >= 90 ? '#ecfdf5' : pct >= 70 ? '#fffbeb' : pct > 0 ? '#fef2f2' : '#f1f5f9';
+
+                  return (
+                    <div key={i} style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: 10, border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontWeight: 900, fontSize: '0.9rem', color: '#0f172a' }}>{mName}</span>
+                          <span style={{ fontSize: '0.62rem', fontWeight: 800, padding: '1px 6px', borderRadius: 4, background: isNc ? '#e0f2fe' : '#f3e8ff', color: isNc ? '#0369a1' : '#6b21a8' }}>
+                            {isNc ? 'NC' : 'TANDEM'}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: '0.75rem', fontWeight: 900, color: pctColor, background: pctBg, padding: '2px 7px', borderRadius: 6 }}>
+                          {pct}%
+                        </span>
+                      </div>
+
+                      <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#1e40af', margin: '4px 0 2px' }}>
+                        {(m.actual || 0).toLocaleString()} <span style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 600 }}>/ {(m.target || 500).toLocaleString()}</span>
+                      </div>
+
+                      {/* Visual Output % Progress Bar */}
+                      <div style={{ width: '100%', height: 6, background: '#e2e8f0', borderRadius: 3, margin: '6px 0', overflow: 'hidden' }}>
+                        <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: pctColor }} />
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#64748b' }}>
+                        <span>Status: <strong style={{ color: m.status === 'Running' ? '#059669' : '#dc2626' }}>{m.status || 'Running'}</strong></span>
+                        <span>Downtime: {m.downtime || 0}m</span>
+                      </div>
                     </div>
-                    <div style={{ fontSize: '1.2rem', fontWeight: 900, color: '#2563eb', margin: '4px 0 2px' }}>
-                      {m.actual} <span style={{ fontSize: '0.7rem', color: '#64748b' }}>/ {m.target}</span>
-                    </div>
-                    <div style={{ fontSize: '0.68rem', color: '#64748b' }}>
-                      Downtime: {m.downtime}m
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
