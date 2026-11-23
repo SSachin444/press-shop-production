@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import LoginScreen from './components/LoginScreen';
 import WiFiServerModal from './components/WiFiServerModal';
+import SupabaseModal from './components/SupabaseModal';
 import NotificationModal from './components/NotificationModal';
 import MobileNavBar from './components/MobileNavBar';
 
@@ -29,6 +30,7 @@ import ProductionAnalyticsPage from './pages/ProductionAnalyticsPage';
 import ActivityLogPage from './pages/ActivityLogPage';
 
 import { api, getServerUrl } from './api';
+import { isSupabaseConfigured } from './supabase';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // Default to the Home screen matching image
@@ -57,6 +59,7 @@ export default function App() {
   });
 
   const [showWifiModal, setShowWifiModal] = useState(false);
+  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
   const [showNotificationModal, setShowNotificationModal] = useState(false);
   const [notifications, setNotifications] = useState([]);
 
@@ -148,10 +151,16 @@ export default function App() {
             setIsLoggedIn(true);
           }}
           onOpenWifiSettings={() => setShowWifiModal(true)}
+          onOpenSupabaseSettings={() => setShowSupabaseModal(true)}
         />
         <WiFiServerModal 
           isOpen={showWifiModal}
           onClose={() => setShowWifiModal(false)}
+        />
+        <SupabaseModal 
+          isOpen={showSupabaseModal}
+          onClose={() => setShowSupabaseModal(false)}
+          onConnectionChanged={() => setSyncKey(k => k + 1)}
         />
       </>
     );
@@ -185,6 +194,8 @@ export default function App() {
           currentUser={currentUser}
           onOpenLogin={handleSwitchRole}
           onOpenWifiModal={() => setShowWifiModal(true)}
+          onOpenSupabaseModal={() => setShowSupabaseModal(true)}
+          isSupabaseActive={isSupabaseConfigured()}
           onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
           notificationCount={notifications.length}
           onOpenNotifications={() => setShowNotificationModal(true)}
@@ -378,6 +389,13 @@ export default function App() {
         isOpen={showWifiModal} 
         onClose={() => setShowWifiModal(false)}
         onServerChanged={() => setSyncKey(k => k + 1)}
+      />
+
+      {/* Supabase Cloud Database Connection Modal */}
+      <SupabaseModal 
+        isOpen={showSupabaseModal} 
+        onClose={() => setShowSupabaseModal(false)}
+        onConnectionChanged={() => setSyncKey(k => k + 1)}
       />
 
       {/* Plant Notifications & Alerts Modal */}

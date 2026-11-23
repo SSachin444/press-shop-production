@@ -11,12 +11,14 @@ import {
   Cpu, 
   Clock,
   Download,
-  Smartphone
+  Smartphone,
+  Database
 } from 'lucide-react';
 import { api, getServerUrl } from '../api';
+import { isSupabaseConfigured } from '../supabase';
 import LiveClock from './LiveClock';
 
-export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
+export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings, onOpenSupabaseSettings }) {
   const [selectedRole, setSelectedRole] = useState('Supervisor'); // Default to Supervisor
   const [operatorName, setOperatorName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -268,6 +270,24 @@ export default function LoginScreen({ onLoginSuccess, onOpenWifiSettings }) {
             <span>Download Android App (APK)</span>
             <Download size={15} style={{ opacity: 0.85 }} />
           </a>
+
+          {/* Cloud Database (Supabase) Connection Indicator */}
+          <div className="login-wifi-footer" style={{ marginBottom: 8, background: isSupabaseConfigured() ? '#f0fdf4' : '#fffbeb', borderColor: isSupabaseConfigured() ? '#bbf7d0' : '#fde68a' }}>
+            <div className="login-wifi-status">
+              <Database size={14} color={isSupabaseConfigured() ? '#059669' : '#d97706'} />
+              <span style={{ color: isSupabaseConfigured() ? '#065f46' : '#92400e' }}>
+                Cloud DB: <strong>{isSupabaseConfigured() ? 'Supabase Connected' : 'Local Storage Mode'}</strong>
+              </span>
+            </div>
+            <button
+              type="button"
+              className="login-wifi-settings-btn"
+              onClick={onOpenSupabaseSettings}
+              style={{ color: '#0f172a', borderColor: '#cbd5e1' }}
+            >
+              Supabase Config
+            </button>
+          </div>
 
           {/* WiFi Server Connection Indicator */}
           <div className="login-wifi-footer">

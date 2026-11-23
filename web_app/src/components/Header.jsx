@@ -1,5 +1,5 @@
 import React from 'react';
-import { Menu, Calendar, Clock, RefreshCw, MapPin, Wifi, ShieldCheck, UserCheck, Users, LogOut, Coffee, Download, Smartphone, Bell } from 'lucide-react';
+import { Menu, Calendar, Clock, RefreshCw, MapPin, Wifi, Database, ShieldCheck, UserCheck, Users, LogOut, Coffee, Download, Smartphone, Bell } from 'lucide-react';
 import { getServerUrl } from '../api';
 import LiveClock from './LiveClock';
 
@@ -15,6 +15,8 @@ export default function Header({
   currentUser,
   onOpenLogin,
   onOpenWifiModal,
+  onOpenSupabaseModal,
+  isSupabaseActive = false,
   onToggleSidebar,
   notificationCount = 0,
   onOpenNotifications
@@ -106,6 +108,30 @@ export default function Header({
           <span>APK</span>
           <Download size={12} color="#059669" />
         </a>
+
+        {/* Supabase Cloud DB Status Button */}
+        <button
+          type="button"
+          onClick={onOpenSupabaseModal}
+          title={isSupabaseActive ? "Supabase Cloud Database Connected (Click to manage)" : "Connect Supabase Database to prevent data loss on refresh"}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            background: isSupabaseActive ? '#ecfdf5' : '#fffbeb',
+            border: `1px solid ${isSupabaseActive ? '#a7f3d0' : '#fde68a'}`,
+            color: isSupabaseActive ? '#065f46' : '#92400e',
+            padding: '5px 10px',
+            borderRadius: 20,
+            fontSize: '0.74rem',
+            fontWeight: 700,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <Database size={13} color={isSupabaseActive ? '#059669' : '#d97706'} />
+          <span>{isSupabaseActive ? 'Cloud: Supabase' : 'Connect Cloud'}</span>
+        </button>
 
         {/* WiFi Server Status Button */}
         <button
