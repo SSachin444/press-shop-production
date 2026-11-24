@@ -1741,8 +1741,18 @@ def hourly_production_api():
                     prod_shift = "Shift A"
 
                 hour_interval = str(item.get("hour_interval", "Hour 1")).strip()
+                
+                # UPH Handling (NC Machines or when provided: Target = UPH * 60)
                 try:
-                    target_qty = max(0, int(float(str(item.get("target_qty", 0) or 0))))
+                    uph_val = max(0.0, float(str(item.get("uph", 0) or 0)))
+                except (ValueError, TypeError):
+                    uph_val = 0.0
+
+                try:
+                    if uph_val > 0:
+                        target_qty = max(0, int(round(uph_val * 60)))
+                    else:
+                        target_qty = max(0, int(float(str(item.get("target_qty", 0) or 0))))
                 except (ValueError, TypeError):
                     target_qty = 0
 
@@ -1750,6 +1760,16 @@ def hourly_production_api():
                     actual_qty = max(0, int(float(str(item.get("actual_qty", 0) or 0))))
                 except (ValueError, TypeError):
                     actual_qty = 0
+
+                # Auto calculate production and hourly output percentages
+                if target_qty > 0:
+                    prod_pct = round((actual_qty / target_qty) * 100, 1)
+                    hourly_out_pct = prod_pct
+                else:
+                    prod_pct = 0.0
+                    hourly_out_pct = 0.0
+
+                entry_time = str(item.get("entry_time", "")).strip() or datetime.now().strftime("%H:%M:%S")
 
                 try:
                     rejected_qty = max(0, int(float(str(item.get("rejected_qty", 0) or 0))))
@@ -1779,8 +1799,8 @@ def hourly_production_api():
                 last_machine = machine_or_line
                 cursor.execute("""
                 INSERT INTO production_records 
-                (production_type, machine_or_line, date, shift, hour_interval, operator_name, tonnage, target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes, downtime_reason, remarks, tool_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (production_type, machine_or_line, date, shift, hour_interval, operator_name, tonnage, target_qty, actual_qty, good_qty, rejected_qty, downtime_minutes, downtime_reason, remarks, tool_number, uph, production_pct, hourly_output_pct, entry_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(machine_or_line, date, shift, hour_interval) DO UPDATE SET
                     production_type = excluded.production_type,
                     operator_name = COALESCE(NULLIF(excluded.operator_name, ''), production_records.operator_name),
@@ -1792,12 +1812,17 @@ def hourly_production_api():
                     downtime_minutes = excluded.downtime_minutes,
                     downtime_reason = excluded.downtime_reason,
                     remarks = excluded.remarks,
-                    tool_number = COALESCE(NULLIF(excluded.tool_number, ''), production_records.tool_number)
+                    tool_number = COALESCE(NULLIF(excluded.tool_number, ''), production_records.tool_number),
+                    uph = excluded.uph,
+                    production_pct = excluded.production_pct,
+                    hourly_output_pct = excluded.hourly_output_pct,
+                    entry_time = excluded.entry_time
                 """, (
                     p_type, machine_or_line, prod_date, prod_shift, hour_interval,
                     op_name, tonnage_val,
                     target_qty, actual_qty, good_qty, rejected_qty, downtime_min,
-                    downtime_reason, remarks, tool_num
+                    downtime_reason, remarks, tool_num,
+                    uph_val, prod_pct, hourly_out_pct, entry_time
                 ))
                 saved_count += 1
 
@@ -2398,27 +2423,71 @@ def manage_activity_logs():
 # -------------------------------------------------------------
 # MACHINE DOWNTIME TRACKING
 # -------------------------------------------------------------
+# -------------------------------------------------------------
+# DOWNTIME CODES (MAX 6 CODES) & MACHINE DOWNTIME
+# -------------------------------------------------------------
+@app.route("/api/downtime-codes", methods=["GET", "POST"])
+def manage_downtime_codes():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        codes = data.get("codes") if isinstance(data.get("codes"), list) else [data]
+        for c in codes:
+            code = str(c.get("code", "")).strip().upper()
+            name = str(c.get("name", "")).strip()
+            desc = str(c.get("description", "")).strip()
+            order_num = int(c.get("display_order", 1))
+            if code and name:
+                cursor.execute("""
+                INSERT INTO downtime_codes (code, name, description, display_order)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(code) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    display_order = excluded.display_order
+                """, (code, name, desc, order_num))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": "Downtime codes updated"})
+
+    cursor.execute("SELECT * FROM downtime_codes WHERE is_active = 1 ORDER BY display_order ASC LIMIT 6")
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "codes": rows})
+
 @app.route("/api/machine-downtime", methods=["GET", "POST"])
 def manage_machine_downtime():
     conn = get_db()
     cursor = conn.cursor()
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
-        m_num = data.get("machine_number", "").strip()
-        b_start = data.get("breakdown_start", datetime.now().strftime("%Y-%m-%d %H:%M")).strip()
-        b_end = data.get("breakdown_end", "").strip() or None
-        reason = data.get("breakdown_reason", "Unscheduled breakdown").strip()
-        minutes = int(data.get("total_downtime_minutes", 0))
+        m_num = data.get("machine_number", "").strip().upper()
+        dt_code = data.get("downtime_code", "D01").strip().upper()
+        b_start = data.get("start_time") or data.get("breakdown_start") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        b_end = data.get("end_time") or data.get("breakdown_end") or None
+        reason = data.get("reason") or data.get("breakdown_reason") or "Machine Breakdown"
+        minutes = int(data.get("duration_minutes") or data.get("total_downtime_minutes") or 0)
         remarks = data.get("remarks", "").strip()
-        reported_by = data.get("reported_by", "Supervisor").strip()
+        op_name = data.get("operator_name") or data.get("reported_by") or ""
+        dt_date = data.get("date") or date.today().isoformat()
+        dt_shift = data.get("shift") or get_current_shift()
         status = data.get("status", "Open").strip()
+
+        # Check for active open downtime for this machine to prevent duplicate overlapping records
+        if status == "Open":
+            cursor.execute("SELECT id FROM machine_downtime WHERE machine_number = ? AND status = 'Open'", (m_num,))
+            existing_open = cursor.fetchone()
+            if existing_open:
+                conn.close()
+                return jsonify({"success": False, "error": f"Machine {m_num} already has an active downtime record (ID #{existing_open['id']}). Please resume or resolve it before starting a new one."}), 400
 
         cursor.execute("""
         INSERT INTO machine_downtime (
-            machine_number, breakdown_start, breakdown_end,
-            breakdown_reason, total_downtime_minutes, remarks, reported_by, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (m_num, b_start, b_end, reason, minutes, remarks, reported_by, status))
+            machine_number, downtime_code, breakdown_start, breakdown_end,
+            breakdown_reason, total_downtime_minutes, remarks, reported_by, operator_name, date, shift, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (m_num, dt_code, b_start, b_end, reason, minutes, remarks, op_name, op_name, dt_date, dt_shift, status))
         conn.commit()
         log_id = cursor.lastrowid
 
@@ -2430,11 +2499,15 @@ def manage_machine_downtime():
         return jsonify({"success": True, "message": f"Downtime logged for {m_num}", "id": log_id})
 
     m_filter = request.args.get("machine")
+    status_filter = request.args.get("status")
     query = "SELECT * FROM machine_downtime WHERE 1=1"
     params = []
     if m_filter:
         query += " AND machine_number = ?"
-        params.append(m_filter)
+        params.append(m_filter.upper())
+    if status_filter:
+        query += " AND status = ?"
+        params.append(status_filter)
     query += " ORDER BY id DESC LIMIT 100"
     cursor.execute(query, params)
     downtimes = [dict(row) for row in cursor.fetchall()]
@@ -2446,19 +2519,35 @@ def resolve_machine_downtime(id):
     conn = get_db()
     cursor = conn.cursor()
     data = request.get_json(silent=True) or {}
-    b_end = data.get("breakdown_end", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    minutes = int(data.get("total_downtime_minutes", 0))
+    b_end = data.get("end_time") or data.get("breakdown_end") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Calculate duration in minutes if not provided
+    cursor.execute("SELECT breakdown_start, machine_number FROM machine_downtime WHERE id = ?", (id,))
+    row = cursor.fetchone()
+    minutes = int(data.get("duration_minutes") or data.get("total_downtime_minutes") or 0)
+    if minutes == 0 and row and row["breakdown_start"]:
+        try:
+            t_start = datetime.fromisoformat(row["breakdown_start"].replace("Z", "+00:00"))
+            t_end = datetime.fromisoformat(b_end.replace("Z", "+00:00"))
+            minutes = max(1, int((t_end - t_start).total_seconds() / 60))
+        except Exception:
+            try:
+                t_start = datetime.strptime(row["breakdown_start"][:16], "%Y-%m-%d %H:%M")
+                t_end = datetime.strptime(b_end[:16], "%Y-%m-%d %H:%M")
+                minutes = max(1, int((t_end - t_start).total_seconds() / 60))
+            except Exception:
+                minutes = 15
+
     cursor.execute("""
     UPDATE machine_downtime SET status = 'Resolved', breakdown_end = ?, total_downtime_minutes = ?
     WHERE id = ?
     """, (b_end, minutes, id))
-    cursor.execute("SELECT machine_number FROM machine_downtime WHERE id = ?", (id,))
-    row = cursor.fetchone()
+    
     if row:
-        cursor.execute("UPDATE machines SET status = 'Idle' WHERE machine_number = ?", (row["machine_number"],))
+        cursor.execute("UPDATE machines SET status = 'Running' WHERE machine_number = ?", (row["machine_number"],))
     conn.commit()
     conn.close()
-    return jsonify({"success": True, "message": "Downtime resolved."})
+    return jsonify({"success": True, "message": "Downtime resolved and machine resumed.", "duration_minutes": minutes})
 
 # -------------------------------------------------------------
 # DYNAMIC IN-APP NOTIFICATIONS

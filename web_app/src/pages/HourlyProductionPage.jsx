@@ -12,14 +12,14 @@ import {
   TrendingUp, 
   BarChart3, 
   Clock, 
-  Filter, 
-  Search,
   CheckCircle2,
   AlertTriangle,
   ArrowRight,
-  ChevronRight
+  Wrench,
+  ShieldCheck,
+  Zap
 } from 'lucide-react';
-import { api } from '../api';
+import { api, DEFAULT_DOWNTIME_CODES } from '../api';
 
 export default function HourlyProductionPage({ 
   selectedDate, 
@@ -34,9 +34,12 @@ export default function HourlyProductionPage({
   const [productionType, setProductionType] = useState(initialType || 'NC');
   const [selectedMachine, setSelectedMachine] = useState(initialMachine || 'NC-01');
   const [selectedOperator, setSelectedOperator] = useState('');
-  const [toolNumber, setToolNumber] = useState('');
+  const [toolNumber, setToolNumber] = useState('TL-1001-CTR');
   const [operatorsList, setOperatorsList] = useState([]);
-  const [hourlyTarget, setHourlyTarget] = useState(75);
+  
+  // UPH (Units Per Hour) for NC machines - Target = UPH * 60
+  const [uphValue, setUphValue] = useState(10); // Default 10 units per hour = 600 target
+  const [downtimeCodes, setDowntimeCodes] = useState(DEFAULT_DOWNTIME_CODES);
   const [activeTab, setActiveTab] = useState('entry'); // 'entry' | 'machine-comparison' | 'operator-comparison'
 
   const ncMachines = Array.from({ length: 16 }, (_, i) => `NC-${String(i + 1).padStart(2, '0')}`);
@@ -53,17 +56,23 @@ export default function HourlyProductionPage({
     { num: 8, label: 'Hour 8 (15:30 - 16:30)' }
   ];
 
-  // 8 Hours row state
+  // 8 Hours row state capturing all required fields:
+  // Date, Shift, Machine, Tool, Operator, UPH, Calculated Target, Actual, Production %, Hourly Output %, Entry Time
   const [hoursState, setHoursState] = useState(() =>
     hourIntervals.map(h => ({
       hourNum: h.num,
       label: h.label,
+      uph: 10,
+      target: 600, // UPH * 60
       actual: 0,
-      target: 75,
       rejected: 0,
       downtime: 0,
-      reason: '',
+      downtimeCode: 'D01',
+      reason: 'Machine Breakdown',
       remarks: '',
+      entryTime: '',
+      operator: '',
+      tool: 'TL-1001-CTR',
       isSaved: false
     }))
   );
@@ -75,7 +84,7 @@ export default function HourlyProductionPage({
   const [notification, setNotification] = useState(null);
 
   useEffect(() => {
-    loadOperators();
+    loadDatabaseResources();
   }, []);
 
   useEffect(() => {
@@ -83,17 +92,22 @@ export default function HourlyProductionPage({
     loadAllShiftHourly();
   }, [activeDate, selectedShift, selectedMachine]);
 
-  const loadOperators = async () => {
+  const loadDatabaseResources = async () => {
     try {
-      const res = await api.getEmployees();
-      const emps = res.employees || [];
+      const [empRes, dtRes] = await Promise.all([
+        api.getEmployees(),
+        api.getDowntimeCodes()
+      ]);
+      const emps = empRes.employees || [];
       setOperatorsList(emps);
       if (emps.length > 0 && !selectedOperator) {
         setSelectedOperator(emps[0].name);
       }
+      if (dtRes && dtRes.codes && dtRes.codes.length > 0) {
+        setDowntimeCodes(dtRes.codes);
+      }
     } catch (e) {
-      console.warn('Operator list error:', e);
-      setOperatorsList([]);
+      console.warn('Initial resources load error:', e);
     }
   };
 
@@ -109,35 +123,47 @@ export default function HourlyProductionPage({
       const records = res.records || [];
       const recMap = {};
       records.forEach(r => {
-        // match by interval
         recMap[r.hour_interval] = r;
       });
 
-      // Update hoursState from records
+      // Update hoursState from actual saved database records
       setHoursState(hourIntervals.map(h => {
         const found = recMap[h.label] || recMap[`Hour ${h.num}`];
         if (found) {
+          const rowUph = Number(found.uph) || uphValue;
+          // Target Production = UPH × 60 for NC machines
+          const calcTarget = Number(found.target_qty) || (rowUph > 0 ? Math.round(rowUph * 60) : 600);
           return {
             hourNum: h.num,
             label: h.label,
-            actual: found.actual_qty || 0,
-            target: found.target_qty || hourlyTarget,
-            rejected: found.rejected_qty || 0,
-            downtime: found.downtime_minutes || 0,
-            reason: found.downtime_reason || '',
+            uph: rowUph,
+            target: calcTarget,
+            actual: Number(found.actual_qty) || 0,
+            rejected: Number(found.rejected_qty) || 0,
+            downtime: Number(found.downtime_minutes) || 0,
+            downtimeCode: found.downtime_code || 'D01',
+            reason: found.downtime_reason || 'Machine Breakdown',
             remarks: found.remarks || '',
+            entryTime: found.entry_time || '',
+            operator: found.operator_name || selectedOperator,
+            tool: found.tool_number || toolNumber,
             isSaved: true
           };
         }
         return {
           hourNum: h.num,
           label: h.label,
+          uph: uphValue,
+          target: Math.round(uphValue * 60),
           actual: 0,
-          target: hourlyTarget,
           rejected: 0,
           downtime: 0,
-          reason: '',
+          downtimeCode: 'D01',
+          reason: 'Machine Breakdown',
           remarks: '',
+          entryTime: '',
+          operator: selectedOperator,
+          tool: toolNumber,
           isSaved: false
         };
       }));
@@ -145,9 +171,10 @@ export default function HourlyProductionPage({
       if (records.length > 0) {
         if (records[0].operator_name) setSelectedOperator(records[0].operator_name);
         if (records[0].tool_number) setToolNumber(records[0].tool_number);
+        if (records[0].uph && Number(records[0].uph) > 0) setUphValue(Number(records[0].uph));
       }
     } catch (e) {
-      console.warn('Hourly fetch notice:', e);
+      console.warn('Hourly fetch error:', e);
     } finally {
       setLoading(false);
     }
@@ -174,46 +201,96 @@ export default function HourlyProductionPage({
     setProductionType(type);
     const firstMach = type === 'NC' ? 'NC-01' : 'LP-1';
     setSelectedMachine(firstMach);
-    const defTgt = type === 'NC' ? 75 : 100;
-    setHourlyTarget(defTgt);
-    setHoursState(prev => prev.map(h => ({ ...h, target: defTgt })));
+    const defUph = type === 'NC' ? 10 : 12;
+    setUphValue(defUph);
+    setHoursState(prev => prev.map(h => ({
+      ...h,
+      uph: defUph,
+      target: Math.round(defUph * 60)
+    })));
   };
 
+  // When top-level UPH changes, update rows that haven't been saved yet
+  const handleUphChange = (newUph) => {
+    const val = Math.max(0, parseFloat(newUph) || 0);
+    setUphValue(val);
+    const calcTarget = Math.round(val * 60);
+    setHoursState(prev => prev.map(h => ({
+      ...h,
+      uph: val,
+      target: calcTarget
+    })));
+  };
+
+  // Row updates
   const handleUpdateRow = (index, field, value) => {
     setHoursState(prev => {
       const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
+      const row = { ...updated[index], [field]: value };
+      
+      // If UPH on row is changed, automatically recalculate target = UPH * 60
+      if (field === 'uph') {
+        const u = Math.max(0, parseFloat(value) || 0);
+        row.uph = u;
+        row.target = Math.round(u * 60);
+      }
+      
+      // If downtime code is changed, update reason description
+      if (field === 'downtimeCode') {
+        const matched = downtimeCodes.find(c => c.code === value);
+        if (matched) {
+          row.reason = matched.name;
+        }
+      }
+
+      updated[index] = row;
       return updated;
     });
   };
 
+  // Save single hourly entry capturing all 11 required parameters
   const handleSaveSingleHour = async (hourIndex) => {
     const row = hoursState[hourIndex];
     try {
       setSavingHour(row.hourNum);
+      const currentTimeStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const finalEntryTime = row.entryTime || currentTimeStr;
+
+      // Target Production = UPH × 60
+      const finalUph = Number(row.uph) || uphValue;
+      const calcTarget = Math.round(finalUph * 60);
+      const actualQty = Number(row.actual) || 0;
+      const prodPct = calcTarget > 0 ? Number(((actualQty / calcTarget) * 100).toFixed(1)) : 0;
+      const hourlyPct = prodPct;
+
       const payload = {
-        production_type: productionType,
-        machine_or_line: selectedMachine,
         date: activeDate,
         shift: selectedShift,
-        hour_interval: row.label,
-        tool_number: toolNumber,
-        operator_name: selectedOperator,
-        target_qty: Number(row.target) || 0,
-        actual_qty: Number(row.actual) || 0,
-        good_qty: Math.max(0, (Number(row.actual) || 0) - (Number(row.rejected) || 0)),
+        machine_or_line: selectedMachine,
+        production_type: productionType,
+        tool_number: toolNumber || row.tool || 'TL-1001-CTR',
+        operator_name: selectedOperator || row.operator || 'Line Operator',
+        uph: finalUph,
+        target_qty: calcTarget,
+        actual_qty: actualQty,
+        good_qty: Math.max(0, actualQty - (Number(row.rejected) || 0)),
         rejected_qty: Number(row.rejected) || 0,
+        production_pct: prodPct,
+        hourly_output_pct: hourlyPct,
         downtime_minutes: Number(row.downtime) || 0,
-        downtime_reason: row.reason || '',
-        remarks: row.remarks || ''
+        downtime_code: row.downtimeCode || 'D01',
+        downtime_reason: row.reason || 'Machine Breakdown',
+        remarks: row.remarks || '',
+        entry_time: finalEntryTime,
+        hour_interval: row.label
       };
 
       await api.saveHourlyProduction(payload);
-      showNotice('success', `Saved output for ${row.label} (${row.actual} pcs).`);
+      showNotice('success', `Saved ${selectedMachine} ${row.label}: Target=${calcTarget} (UPH×60), Actual=${actualQty}, Achievement=${prodPct}%`);
       
       setHoursState(prev => {
         const u = [...prev];
-        u[hourIndex].isSaved = true;
+        u[hourIndex] = { ...u[hourIndex], isSaved: true, entryTime: finalEntryTime, target: calcTarget };
         return u;
       });
 
@@ -226,109 +303,87 @@ export default function HourlyProductionPage({
     }
   };
 
+  // Save all 8 hours in batch
   const handleSaveAllHours = async () => {
     try {
       setSavingAll(true);
+      const currentTimeStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      let savedCount = 0;
+
       for (let i = 0; i < hoursState.length; i++) {
         const row = hoursState[i];
-        if (row.actual > 0 || row.downtime > 0) {
+        if (row.actual > 0 || row.downtime > 0 || row.isSaved) {
+          const finalUph = Number(row.uph) || uphValue;
+          const calcTarget = Math.round(finalUph * 60);
+          const actualQty = Number(row.actual) || 0;
+          const prodPct = calcTarget > 0 ? Number(((actualQty / calcTarget) * 100).toFixed(1)) : 0;
+
           const payload = {
-            production_type: productionType,
-            machine_or_line: selectedMachine,
             date: activeDate,
             shift: selectedShift,
-            hour_interval: row.label,
-            tool_number: toolNumber,
-            operator_name: selectedOperator,
-            target_qty: Number(row.target) || 0,
-            actual_qty: Number(row.actual) || 0,
-            good_qty: Math.max(0, (Number(row.actual) || 0) - (Number(row.rejected) || 0)),
+            machine_or_line: selectedMachine,
+            production_type: productionType,
+            tool_number: toolNumber || row.tool || 'TL-1001-CTR',
+            operator_name: selectedOperator || row.operator || 'Line Operator',
+            uph: finalUph,
+            target_qty: calcTarget,
+            actual_qty: actualQty,
+            good_qty: Math.max(0, actualQty - (Number(row.rejected) || 0)),
             rejected_qty: Number(row.rejected) || 0,
+            production_pct: prodPct,
+            hourly_output_pct: prodPct,
             downtime_minutes: Number(row.downtime) || 0,
-            downtime_reason: row.reason || '',
-            remarks: row.remarks || ''
+            downtime_code: row.downtimeCode || 'D01',
+            downtime_reason: row.reason || 'Machine Breakdown',
+            remarks: row.remarks || '',
+            entry_time: row.entryTime || currentTimeStr,
+            hour_interval: row.label
           };
           await api.saveHourlyProduction(payload);
+          savedCount++;
         }
       }
-      showNotice('success', `All hours saved successfully for ${selectedMachine}.`);
+      showNotice('success', `Successfully saved ${savedCount} hours for ${selectedMachine}. Calculations updated.`);
       loadHourlyDataForMachine();
       loadAllShiftHourly();
       if (onSync) onSync();
     } catch (err) {
-      showNotice('error', err.message || 'Failed to save records');
+      showNotice('error', err.message || 'Failed to save all records');
     } finally {
       setSavingAll(false);
     }
   };
 
-  // Cumulative sums
+  // Shift aggregates
   const totalShiftTarget = hoursState.reduce((sum, h) => sum + (Number(h.target) || 0), 0);
   const totalShiftActual = hoursState.reduce((sum, h) => sum + (Number(h.actual) || 0), 0);
-  const totalShiftGood = hoursState.reduce((sum, h) => sum + Math.max(0, (Number(h.actual) || 0) - (Number(h.rejected) || 0)), 0);
   const totalShiftDowntime = hoursState.reduce((sum, h) => sum + (Number(h.downtime) || 0), 0);
-  const shiftAchievePct = totalShiftTarget > 0 ? Math.round((totalShiftActual / totalShiftTarget) * 100) : 0;
-  const remainingShiftTarget = Math.max(0, totalShiftTarget - totalShiftActual);
-
-  // Machine comparison aggregation
-  const machineAgg = {};
-  allHourlyRecords.forEach(r => {
-    const m = r.machine_or_line;
-    if (!machineAgg[m]) {
-      machineAgg[m] = { machine: m, type: r.production_type, target: 0, actual: 0, downtime: 0, operator: r.operator_name };
-    }
-    machineAgg[m].target += r.target_qty || 0;
-    machineAgg[m].actual += r.actual_qty || 0;
-    machineAgg[m].downtime += r.downtime_minutes || 0;
-  });
-  const machineComparisonList = Object.values(machineAgg).map(m => ({
-    ...m,
-    achievePct: m.target > 0 ? Math.round((m.actual / m.target) * 100) : 0
-  })).sort((a, b) => b.actual - a.actual);
-
-  // Operator comparison aggregation
-  const opAgg = {};
-  allHourlyRecords.forEach(r => {
-    const op = r.operator_name || 'Unassigned';
-    if (!opAgg[op]) {
-      opAgg[op] = { name: op, actual: 0, target: 0, count: 0, machines: new Set() };
-    }
-    opAgg[op].actual += r.actual_qty || 0;
-    opAgg[op].target += r.target_qty || 0;
-    opAgg[op].count += 1;
-    opAgg[op].machines.add(r.machine_or_line);
-  });
-  const operatorComparisonList = Object.values(opAgg).map(o => ({
-    ...o,
-    machineCount: o.machines.size,
-    achievePct: o.target > 0 ? Math.round((o.actual / o.target) * 100) : 0
-  })).sort((a, b) => b.actual - a.actual);
+  const shiftAchievePct = totalShiftTarget > 0 ? Number(((totalShiftActual / totalShiftTarget) * 100).toFixed(1)) : 0;
 
   return (
-    <div style={{ maxWidth: 1600, margin: '0 auto', padding: '20px 24px 80px', background: '#f8fafc' }}>
-      
-      {/* Toast Notice */}
+    <div style={{ padding: '20px', maxWidth: '1440px', margin: '0 auto', color: '#0f172a' }}>
+      {/* Toast Alert */}
       {notification && (
         <div style={{
           padding: '12px 18px',
           borderRadius: 8,
           marginBottom: 16,
-          background: notification.type === 'success' ? '#ecfdf5' : '#fef2f2',
-          border: `1px solid ${notification.type === 'success' ? '#a7f3d0' : '#fecaca'}`,
-          color: notification.type === 'success' ? '#065f46' : '#991b1b',
+          background: notification.type === 'success' ? '#f0fdf4' : '#fff7ed',
+          border: `1px solid ${notification.type === 'success' ? '#bbf7d0' : '#fed7aa'}`,
+          color: notification.type === 'success' ? '#15803d' : '#c2410c',
           fontWeight: 700,
-          fontSize: '0.84rem',
+          fontSize: '0.85rem',
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          boxShadow: '0 2px 6px rgba(0,0,0,0.06)'
+          gap: 10,
+          boxShadow: '0 2px 6px rgba(0,0,0,0.05)'
         }}>
-          {notification.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+          {notification.type === 'success' ? <CheckCircle size={18} color="#16a34a" /> : <AlertCircle size={18} color="#ea580c" />}
           <span>{notification.message}</span>
         </div>
       )}
 
-      {/* Header Banner */}
+      {/* Main Header with Industrial Orange / Green Theme */}
       <div style={{
         background: '#ffffff',
         borderRadius: 14,
@@ -338,90 +393,140 @@ export default function HourlyProductionPage({
         marginBottom: 20
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ width: 44, height: 44, borderRadius: 10, background: '#fef3c7', color: '#b45309', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Timer size={22} />
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{
+                background: '#ea580c',
+                color: '#ffffff',
+                padding: '4px 10px',
+                borderRadius: 6,
+                fontWeight: 900,
+                fontSize: '0.72rem',
+                letterSpacing: '0.05em'
+              }}>
+                UPH CADENCE CALCULATION
+              </span>
+              <span style={{
+                background: '#16a34a',
+                color: '#ffffff',
+                padding: '4px 10px',
+                borderRadius: 6,
+                fontWeight: 800,
+                fontSize: '0.72rem'
+              }}>
+                TARGET = UPH × 60
+              </span>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 900, color: '#0f172a', margin: 0 }}>
+                Hourly Production Entry
+              </h2>
             </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', padding: '2px 8px', borderRadius: 4, fontSize: '0.7rem', fontWeight: 800 }}>
-                  PAGE 2
-                </span>
-                <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
-                  HOUR-BY-HOUR SHOPFLOOR LOGGING
-                </span>
-              </div>
-              <h1 style={{ fontSize: '1.4rem', fontWeight: 900, color: '#0f172a', margin: '2px 0 0' }}>
-                Hourly Production Management
-              </h1>
-            </div>
+            <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '4px 0 0' }}>
+              Target production is calculated automatically: <strong style={{ color: '#ea580c' }}>Target = UPH × 60</strong>. Operators enter only actual units produced.
+            </p>
           </div>
 
-          {/* Sub Navigation */}
-          <div style={{ display: 'flex', gap: 8, background: '#f1f5f9', padding: 4, borderRadius: 8 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <span style={{ fontSize: '0.8rem', color: '#0f172a', background: '#f8fafc', border: '1px solid #e2e8f0', padding: '7px 14px', borderRadius: 8, fontWeight: 700 }}>
+              📅 {activeDate} • <span style={{ color: '#ea580c' }}>{selectedShift}</span>
+            </span>
             <button
-              type="button"
-              onClick={() => setActiveTab('entry')}
+              onClick={() => { loadHourlyDataForMachine(); loadAllShiftHourly(); }}
+              disabled={loading}
               style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
                 padding: '7px 14px',
-                borderRadius: 6,
-                border: 'none',
-                background: activeTab === 'entry' ? '#ffffff' : 'transparent',
-                color: activeTab === 'entry' ? '#1e40af' : '#64748b',
-                fontWeight: activeTab === 'entry' ? 800 : 600,
-                fontSize: '0.78rem',
+                borderRadius: 8,
+                background: '#ffffff',
+                border: '1px solid #cbd5e1',
+                color: '#475569',
+                fontSize: '0.8rem',
+                fontWeight: 700,
                 cursor: 'pointer'
               }}
             >
-              Hourly Entry Grid
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('machine-comparison')}
-              style={{
-                padding: '7px 14px',
-                borderRadius: 6,
-                border: 'none',
-                background: activeTab === 'machine-comparison' ? '#ffffff' : 'transparent',
-                color: activeTab === 'machine-comparison' ? '#1e40af' : '#64748b',
-                fontWeight: activeTab === 'machine-comparison' ? 800 : 600,
-                fontSize: '0.78rem',
-                cursor: 'pointer'
-              }}
-            >
-              Machine Comparison
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('operator-comparison')}
-              style={{
-                padding: '7px 14px',
-                borderRadius: 6,
-                border: 'none',
-                background: activeTab === 'operator-comparison' ? '#ffffff' : 'transparent',
-                color: activeTab === 'operator-comparison' ? '#1e40af' : '#64748b',
-                fontWeight: activeTab === 'operator-comparison' ? 800 : 600,
-                fontSize: '0.78rem',
-                cursor: 'pointer'
-              }}
-            >
-              Operator Comparison
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+              <span>Refresh</span>
             </button>
           </div>
         </div>
 
-        {/* Machine & Operator Selection Strip */}
+        {/* Navigation Tabs */}
+        <div style={{
+          display: 'flex',
+          gap: 6,
+          marginTop: 18,
+          background: '#f1f5f9',
+          padding: 4,
+          borderRadius: 8,
+          width: 'fit-content'
+        }}>
+          <button
+            type="button"
+            onClick={() => setActiveTab('entry')}
+            style={{
+              padding: '7px 16px',
+              borderRadius: 6,
+              border: 'none',
+              background: activeTab === 'entry' ? '#ffffff' : 'transparent',
+              color: activeTab === 'entry' ? '#ea580c' : '#64748b',
+              fontWeight: activeTab === 'entry' ? 800 : 600,
+              fontSize: '0.8rem',
+              cursor: 'pointer',
+              boxShadow: activeTab === 'entry' ? '0 1px 3px rgba(0,0,0,0.06)' : 'none'
+            }}
+          >
+            Hourly Production Grid
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('machine-comparison')}
+            style={{
+              padding: '7px 16px',
+              borderRadius: 6,
+              border: 'none',
+              background: activeTab === 'machine-comparison' ? '#ffffff' : 'transparent',
+              color: activeTab === 'machine-comparison' ? '#ea580c' : '#64748b',
+              fontWeight: activeTab === 'machine-comparison' ? 800 : 600,
+              fontSize: '0.8rem',
+              cursor: 'pointer',
+              boxShadow: activeTab === 'machine-comparison' ? '0 1px 3px rgba(0,0,0,0.06)' : 'none'
+            }}
+          >
+            Machine Comparison
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('operator-comparison')}
+            style={{
+              padding: '7px 16px',
+              borderRadius: 6,
+              border: 'none',
+              background: activeTab === 'operator-comparison' ? '#ffffff' : 'transparent',
+              color: activeTab === 'operator-comparison' ? '#ea580c' : '#64748b',
+              fontWeight: activeTab === 'operator-comparison' ? 800 : 600,
+              fontSize: '0.8rem',
+              cursor: 'pointer',
+              boxShadow: activeTab === 'operator-comparison' ? '0 1px 3px rgba(0,0,0,0.06)' : 'none'
+            }}
+          >
+            Operator Comparison
+          </button>
+        </div>
+
+        {/* Machine & Operator Configuration Controls */}
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-          gap: 12,
+          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+          gap: 14,
           marginTop: 18,
           paddingTop: 16,
           borderTop: '1px solid #f1f5f9'
         }}>
           {/* Production Type Toggle */}
           <div>
-            <label style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', display: 'block', marginBottom: 4 }}>
+            <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 5 }}>
               Production Type
             </label>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
@@ -429,29 +534,29 @@ export default function HourlyProductionPage({
                 type="button"
                 onClick={() => handleTypeChange('NC')}
                 style={{
-                  padding: '7px',
+                  padding: '8px',
                   borderRadius: 6,
-                  border: productionType === 'NC' ? '2px solid #1e40af' : '1px solid #cbd5e1',
-                  background: productionType === 'NC' ? '#eff6ff' : '#fff',
-                  color: productionType === 'NC' ? '#1e40af' : '#475569',
+                  border: productionType === 'NC' ? '2px solid #ea580c' : '1px solid #cbd5e1',
+                  background: productionType === 'NC' ? '#fff7ed' : '#fff',
+                  color: productionType === 'NC' ? '#ea580c' : '#475569',
                   fontWeight: 800,
-                  fontSize: '0.78rem',
+                  fontSize: '0.8rem',
                   cursor: 'pointer'
                 }}
               >
-                NC (16 Units)
+                NC (16 Presses)
               </button>
               <button
                 type="button"
                 onClick={() => handleTypeChange('Tandem')}
                 style={{
-                  padding: '7px',
+                  padding: '8px',
                   borderRadius: 6,
-                  border: productionType === 'Tandem' ? '2px solid #7c3aed' : '1px solid #cbd5e1',
-                  background: productionType === 'Tandem' ? '#f5f3ff' : '#fff',
-                  color: productionType === 'Tandem' ? '#7c3aed' : '#475569',
+                  border: productionType === 'Tandem' ? '2px solid #16a34a' : '1px solid #cbd5e1',
+                  background: productionType === 'Tandem' ? '#f0fdf4' : '#fff',
+                  color: productionType === 'Tandem' ? '#16a34a' : '#475569',
                   fontWeight: 800,
-                  fontSize: '0.78rem',
+                  fontSize: '0.8rem',
                   cursor: 'pointer'
                 }}
               >
@@ -462,47 +567,46 @@ export default function HourlyProductionPage({
 
           {/* Machine Selection */}
           <div>
-            <label style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', display: 'block', marginBottom: 4 }}>
+            <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 5 }}>
               Machine Selection *
             </label>
             <select
               value={selectedMachine}
               onChange={(e) => setSelectedMachine(e.target.value)}
-              style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem', fontWeight: 800, background: '#fff' }}
+              style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.85rem', fontWeight: 800, background: '#fff' }}
             >
               {productionType === 'NC'
-                ? ncMachines.map(m => <option key={m} value={m}>{m} (Press Shop)</option>)
+                ? ncMachines.map(m => <option key={m} value={m}>{m} (Press Unit)</option>)
                 : tandemLines.map(t => <option key={t} value={t}>{t} (Tandem Line)</option>)
               }
             </select>
           </div>
 
-          {/* Tool Number */}
+          {/* Tool / Die Number */}
           <div>
-            <label style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              Tool / Die Number
+            <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 5 }}>
+              Tool / Die Number *
             </label>
             <input
               type="text"
               placeholder="e.g. TL-1001-CTR"
               value={toolNumber}
-              onChange={(e) => setToolNumber(e.target.value)}
-              style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+              onChange={(e) => setToolNumber(e.target.value.toUpperCase())}
+              style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.85rem', fontWeight: 700, fontFamily: 'monospace' }}
             />
           </div>
 
-          {/* Operator Selection */}
+          {/* Operator Name */}
           <div>
-            <label style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              Operator Assigned
+            <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#475569', display: 'block', marginBottom: 5 }}>
+              Operator Assigned *
             </label>
             {operatorsList.length > 0 ? (
               <select
                 value={selectedOperator}
                 onChange={(e) => setSelectedOperator(e.target.value)}
-                style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem', background: '#fff' }}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.85rem', fontWeight: 600, background: '#fff' }}
               >
-                <option value="">Select Operator...</option>
                 {operatorsList.map(op => (
                   <option key={op.emp_id} value={op.name}>{op.name} ({op.emp_id})</option>
                 ))}
@@ -510,30 +614,40 @@ export default function HourlyProductionPage({
             ) : (
               <input
                 type="text"
-                placeholder="Enter operator name"
+                placeholder="Operator name"
                 value={selectedOperator}
                 onChange={(e) => setSelectedOperator(e.target.value)}
-                style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
               />
             )}
           </div>
 
-          {/* Standard Target per Hour */}
+          {/* UPH Input (Replaces Manual Target for NC Machines) */}
           <div>
-            <label style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', display: 'block', marginBottom: 4 }}>
-              Target per Hour
+            <label style={{ fontSize: '0.74rem', fontWeight: 800, color: '#ea580c', display: 'block', marginBottom: 5 }}>
+              ⚡ UPH (Units Per Hour) *
             </label>
             <input
               type="number"
               min="1"
-              value={hourlyTarget}
-              onChange={(e) => {
-                const val = parseInt(e.target.value) || 0;
-                setHourlyTarget(val);
-                setHoursState(prev => prev.map(h => ({ ...h, target: val })));
+              step="0.5"
+              value={uphValue}
+              onChange={(e) => handleUphChange(e.target.value)}
+              placeholder="e.g. 10"
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '2px solid #ea580c',
+                fontSize: '0.9rem',
+                fontWeight: 900,
+                color: '#ea580c',
+                background: '#fff7ed'
               }}
-              style={{ width: '100%', padding: '7px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.85rem', fontWeight: 800 }}
             />
+            <span style={{ fontSize: '0.68rem', fontWeight: 800, color: '#16a34a', marginTop: 3, display: 'block' }}>
+              ✓ Auto Target: {Math.round(uphValue * 60)} pcs/hr
+            </span>
           </div>
         </div>
       </div>
@@ -541,38 +655,43 @@ export default function HourlyProductionPage({
       {/* ── VIEW 1: HOURLY ENTRY GRID ── */}
       {activeTab === 'entry' && (
         <div>
-          {/* Shift Performance Summary Cards */}
+          {/* Shift Performance Summary KPI Cards */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 20 }}>
-            <div style={{ background: '#ffffff', padding: '16px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-              <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Shift Total Actual</div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#1e40af', margin: '4px 0 2px' }}>{totalShiftActual.toLocaleString()}</div>
-              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Target: {totalShiftTarget.toLocaleString()} units</div>
+            <div style={{ background: '#ffffff', padding: '18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Shift Total Actual</div>
+              <div style={{ fontSize: '1.75rem', fontWeight: 900, color: '#0f172a', margin: '4px 0 2px' }}>{totalShiftActual.toLocaleString()}</div>
+              <div style={{ fontSize: '0.72rem', color: '#16a34a', fontWeight: 700 }}>Calculated Target: {totalShiftTarget.toLocaleString()} units</div>
             </div>
 
-            <div style={{ background: '#ffffff', padding: '16px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-              <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Achievement Rate</div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 900, color: shiftAchievePct >= 95 ? '#059669' : (shiftAchievePct >= 75 ? '#d97706' : '#dc2626'), margin: '4px 0 2px' }}>
+            <div style={{ background: '#ffffff', padding: '18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Production Achievement %</div>
+              <div style={{
+                fontSize: '1.75rem',
+                fontWeight: 900,
+                color: shiftAchievePct >= 85 ? '#16a34a' : '#ea580c',
+                margin: '4px 0 2px'
+              }}>
                 {shiftAchievePct}%
               </div>
               <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                {shiftAchievePct >= 95 ? 'Target on track' : 'Below target cadence'}
+                {shiftAchievePct >= 85 ? '✓ Good Performance' : '⚠️ Below UPH Target Cadence'}
               </div>
             </div>
 
-            <div style={{ background: '#ffffff', padding: '16px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-              <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Remaining Target</div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 900, color: remainingShiftTarget === 0 ? '#059669' : '#d97706', margin: '4px 0 2px' }}>
-                {remainingShiftTarget.toLocaleString()}
+            <div style={{ background: '#ffffff', padding: '18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Standard Hourly Target</div>
+              <div style={{ fontSize: '1.75rem', fontWeight: 900, color: '#ea580c', margin: '4px 0 2px' }}>
+                {Math.round(uphValue * 60)} <span style={{ fontSize: '0.9rem', color: '#64748b', fontWeight: 600 }}>pcs</span>
               </div>
-              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Units needed to meet shift quota</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Derived strictly from UPH ({uphValue} × 60)</div>
             </div>
 
-            <div style={{ background: '#ffffff', padding: '16px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
-              <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Total Downtime</div>
-              <div style={{ fontSize: '1.6rem', fontWeight: 900, color: totalShiftDowntime > 0 ? '#ea580c' : '#64748b', margin: '4px 0 2px' }}>
-                {totalShiftDowntime}m
+            <div style={{ background: '#ffffff', padding: '18px', borderRadius: 12, border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Shift Downtime</div>
+              <div style={{ fontSize: '1.75rem', fontWeight: 900, color: totalShiftDowntime > 0 ? '#ea580c' : '#16a34a', margin: '4px 0 2px' }}>
+                {totalShiftDowntime} <span style={{ fontSize: '0.9rem', color: '#64748b', fontWeight: 600 }}>min</span>
               </div>
-              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Cumulative lost minutes</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Cumulative recorded stoppage</div>
             </div>
           </div>
 
@@ -585,13 +704,13 @@ export default function HourlyProductionPage({
             overflow: 'hidden',
             marginBottom: 20
           }}>
-            <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ padding: '16px 22px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
               <div>
-                <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-                  Hour-by-Hour Production Entry: {selectedMachine}
+                <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+                  8-Hour Production Matrix: {selectedMachine}
                 </h3>
-                <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '2px 0 0' }}>
-                  Hours below target are automatically highlighted in amber/red. Enter output and click Save.
+                <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '2px 0 0' }}>
+                  Target is automatically calculated as UPH × 60. Percentage is color-coded (Green ≥ 85%, Orange &lt; 85%).
                 </p>
               </div>
 
@@ -600,43 +719,46 @@ export default function HourlyProductionPage({
                 onClick={handleSaveAllHours}
                 disabled={savingAll}
                 style={{
-                  background: '#2563eb',
+                  background: '#ea580c',
                   color: '#ffffff',
                   border: 'none',
-                  borderRadius: 6,
-                  padding: '8px 16px',
-                  fontSize: '0.8rem',
+                  borderRadius: 8,
+                  padding: '9px 18px',
+                  fontSize: '0.82rem',
                   fontWeight: 800,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 6
+                  gap: 8,
+                  boxShadow: '0 2px 6px rgba(234, 88, 12, 0.25)'
                 }}
               >
-                <Save size={14} />
-                <span>{savingAll ? 'Saving All...' : 'Save All 8 Hours'}</span>
+                <Save size={15} />
+                <span>{savingAll ? 'Saving All Records...' : 'Save All 8 Hours'}</span>
               </button>
             </div>
 
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
                 <thead>
-                  <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Hour</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Interval</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Target</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Actual Output</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Scrap</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Achievement</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Downtime (min)</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Reason</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800, textAlign: 'center' }}>Action</th>
+                  <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', textAlign: 'left', color: '#334155' }}>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Hour Interval</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Tool #</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>UPH</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800, color: '#ea580c' }}>Calculated Target</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Actual Output</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Production %</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Hourly Output %</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Downtime (min)</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Reason (6 Codes)</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800 }}>Entry Time</th>
+                    <th style={{ padding: '12px 14px', fontWeight: 800, textAlign: 'center' }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {hoursState.map((h, index) => {
-                    const ach = h.target > 0 ? Math.round((h.actual / h.target) * 100) : 0;
-                    const belowTarget = h.actual < h.target && h.actual > 0;
+                    const rowTarget = h.target > 0 ? h.target : Math.round(h.uph * 60);
+                    const ach = rowTarget > 0 ? Math.round((h.actual / rowTarget) * 100) : 0;
                     const isSaving = savingHour === h.hourNum;
 
                     return (
@@ -644,20 +766,49 @@ export default function HourlyProductionPage({
                         key={h.hourNum} 
                         style={{ 
                           borderBottom: '1px solid #f1f5f9',
-                          background: belowTarget ? '#fffbeb' : (h.isSaved ? '#f8fafc' : '#ffffff')
+                          background: h.isSaved ? '#ffffff' : '#fcfcfd'
                         }}
                       >
-                        <td style={{ padding: '10px 14px', fontWeight: 800, color: '#0f172a' }}>Hour {h.hourNum}</td>
-                        <td style={{ padding: '10px 14px', color: '#475569' }}>{h.label}</td>
+                        {/* 1. Interval */}
+                        <td style={{ padding: '10px 14px', fontWeight: 800, color: '#0f172a' }}>
+                          <div>{h.label}</div>
+                          <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Hour {h.hourNum}</span>
+                        </td>
+
+                        {/* 2. Tool Number */}
+                        <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: 700, color: '#475569' }}>
+                          {toolNumber}
+                        </td>
+
+                        {/* 3. UPH Input */}
                         <td style={{ padding: '10px 14px' }}>
                           <input
                             type="number"
                             min="0"
-                            value={h.target}
-                            onChange={(e) => handleUpdateRow(index, 'target', parseInt(e.target.value) || 0)}
-                            style={{ width: 65, padding: '5px 8px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
+                            step="0.5"
+                            value={h.uph}
+                            onChange={(e) => handleUpdateRow(index, 'uph', e.target.value)}
+                            style={{ width: 60, padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem', fontWeight: 800, color: '#ea580c' }}
                           />
                         </td>
+
+                        {/* 4. Automatically Calculated Target (UPH * 60) */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{
+                            display: 'inline-block',
+                            background: '#fff7ed',
+                            color: '#ea580c',
+                            fontWeight: 900,
+                            padding: '4px 10px',
+                            borderRadius: 6,
+                            border: '1px solid #fed7aa',
+                            fontSize: '0.85rem'
+                          }}>
+                            {rowTarget}
+                          </span>
+                        </td>
+
+                        {/* 5. Actual Output Input */}
                         <td style={{ padding: '10px 14px' }}>
                           <input
                             type="number"
@@ -665,69 +816,105 @@ export default function HourlyProductionPage({
                             value={h.actual}
                             onChange={(e) => handleUpdateRow(index, 'actual', parseInt(e.target.value) || 0)}
                             style={{ 
-                              width: 75, 
-                              padding: '5px 8px', 
-                              borderRadius: 4, 
-                              border: belowTarget ? '2px solid #f59e0b' : '1px solid #3b82f6', 
-                              fontSize: '0.85rem',
-                              fontWeight: 800,
-                              color: belowTarget ? '#b45309' : '#1e40af'
+                              width: 80, 
+                              padding: '6px 8px', 
+                              borderRadius: 6, 
+                              border: ach >= 85 ? '2px solid #16a34a' : '2px solid #ea580c', 
+                              fontSize: '0.88rem',
+                              fontWeight: 900,
+                              color: ach >= 85 ? '#15803d' : '#ea580c',
+                              background: '#ffffff'
                             }}
                           />
                         </td>
-                        <td style={{ padding: '10px 14px' }}>
-                          <input
-                            type="number"
-                            min="0"
-                            value={h.rejected}
-                            onChange={(e) => handleUpdateRow(index, 'rejected', parseInt(e.target.value) || 0)}
-                            style={{ width: 60, padding: '5px 8px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
-                          />
-                        </td>
+
+                        {/* 6. Production Percentage */}
                         <td style={{ padding: '10px 14px' }}>
                           <span style={{
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                            fontWeight: 800,
-                            fontSize: '0.72rem',
-                            background: ach >= 95 ? '#ecfdf5' : (ach >= 75 ? '#fffbeb' : '#fef2f2'),
-                            color: ach >= 95 ? '#059669' : (ach >= 75 ? '#d97706' : '#dc2626')
+                            padding: '4px 10px',
+                            borderRadius: 6,
+                            fontWeight: 900,
+                            fontSize: '0.78rem',
+                            background: ach >= 85 ? '#dcfce7' : '#ffedd5',
+                            color: ach >= 85 ? '#15803d' : '#ea580c',
+                            display: 'inline-block'
                           }}>
                             {ach}%
                           </span>
                         </td>
+
+                        {/* 7. Hourly Output Percentage */}
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{
+                            padding: '4px 10px',
+                            borderRadius: 6,
+                            fontWeight: 900,
+                            fontSize: '0.78rem',
+                            background: ach >= 85 ? '#dcfce7' : '#ffedd5',
+                            color: ach >= 85 ? '#15803d' : '#ea580c',
+                            display: 'inline-block'
+                          }}>
+                            {ach}%
+                          </span>
+                        </td>
+
+                        {/* 8. Downtime (min) */}
                         <td style={{ padding: '10px 14px' }}>
                           <input
                             type="number"
                             min="0"
                             value={h.downtime}
                             onChange={(e) => handleUpdateRow(index, 'downtime', parseInt(e.target.value) || 0)}
-                            style={{ width: 60, padding: '5px 8px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
+                            style={{ width: 60, padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
                           />
                         </td>
+
+                        {/* 9. Reason (Dropdown of the 6 Configured Codes) */}
                         <td style={{ padding: '10px 14px' }}>
-                          <input
-                            type="text"
-                            placeholder="Reason if delayed"
-                            value={h.reason}
-                            onChange={(e) => handleUpdateRow(index, 'reason', e.target.value)}
-                            style={{ width: 140, padding: '5px 8px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: '0.76rem' }}
-                          />
+                          <select
+                            value={h.downtimeCode}
+                            onChange={(e) => handleUpdateRow(index, 'downtimeCode', e.target.value)}
+                            style={{
+                              width: 155,
+                              padding: '6px 8px',
+                              borderRadius: 6,
+                              border: '1px solid #cbd5e1',
+                              fontSize: '0.76rem',
+                              fontWeight: 600,
+                              background: '#fff'
+                            }}
+                          >
+                            {downtimeCodes.map(code => (
+                              <option key={code.code} value={code.code}>
+                                {code.code} – {code.name}
+                              </option>
+                            ))}
+                          </select>
                         </td>
+
+                        {/* 10. Entry Time */}
+                        <td style={{ padding: '10px 14px', fontSize: '0.75rem', color: '#64748b', fontFamily: 'monospace' }}>
+                          {h.entryTime || '—'}
+                        </td>
+
+                        {/* 11. Save Action */}
                         <td style={{ padding: '10px 14px', textAlign: 'center' }}>
                           <button
                             type="button"
                             onClick={() => handleSaveSingleHour(index)}
                             disabled={isSaving}
                             style={{
-                              padding: '5px 12px',
-                              borderRadius: 4,
+                              padding: '6px 14px',
+                              borderRadius: 6,
                               border: 'none',
-                              background: h.isSaved ? '#10b981' : '#2563eb',
+                              background: h.isSaved ? '#16a34a' : '#ea580c',
                               color: '#fff',
-                              fontSize: '0.72rem',
+                              fontSize: '0.74rem',
                               fontWeight: 800,
-                              cursor: 'pointer'
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4
                             }}
                           >
                             {isSaving ? '...' : (h.isSaved ? '✓ Saved' : 'Save')}
@@ -748,68 +935,33 @@ export default function HourlyProductionPage({
         <div style={{
           background: '#ffffff',
           borderRadius: 14,
+          padding: '24px',
           border: '1px solid #e2e8f0',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-          overflow: 'hidden'
+          boxShadow: '0 1px 3px rgba(0,0,0,0.04)'
         }}>
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
-            <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-              Cross-Machine Hourly Output Comparison ({selectedShift} on {activeDate})
-            </h3>
-            <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '2px 0 0' }}>
-              Benchmarking total actual production and target achievement percentages across plant units
-            </p>
+          <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#0f172a', marginBottom: 16 }}>
+            Shopfloor Machine-wise Performance ({activeDate} • {selectedShift})
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+            {allHourlyRecords.length === 0 ? (
+              <p style={{ color: '#64748b', fontSize: '0.85rem' }}>No production records logged yet for this shift.</p>
+            ) : (
+              allHourlyRecords.map((rec, i) => (
+                <div key={i} style={{ border: '1px solid #e2e8f0', padding: '14px', borderRadius: 10, background: '#f8fafc' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontWeight: 800, color: '#0f172a' }}>{rec.machine_or_line}</span>
+                    <span style={{ fontSize: '0.72rem', color: '#64748b' }}>{rec.hour_interval}</span>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: '#475569' }}>Operator: <strong>{rec.operator_name || '—'}</strong></div>
+                  <div style={{ fontSize: '0.8rem', color: '#475569' }}>Tool: <strong>{rec.tool_number || '—'}</strong></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, paddingTop: 8, borderTop: '1px solid #e2e8f0' }}>
+                    <span style={{ fontSize: '0.75rem', color: '#ea580c' }}>UPH: {rec.uph || '—'}</span>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: '#16a34a' }}>Actual: {rec.actual_qty}</span>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
-
-          {machineComparisonList.length === 0 ? (
-            <div style={{ padding: '60px 20px', textAlign: 'center', color: '#94a3b8' }}>
-              No machines have logged hourly output yet for this shift.
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
-                <thead>
-                  <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Rank</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Machine / Line</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Type</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Operator</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Total Target</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Actual Output</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Achievement</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Downtime</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {machineComparisonList.map((m, idx) => (
-                    <tr key={m.machine} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#64748b' }}>#{idx + 1}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#1e40af' }}>{m.machine}</td>
-                      <td style={{ padding: '10px 14px', color: '#475569' }}>{m.type}</td>
-                      <td style={{ padding: '10px 14px', color: '#334155' }}>{m.operator || '—'}</td>
-                      <td style={{ padding: '10px 14px', color: '#64748b' }}>{m.target}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#0f172a' }}>{m.actual}</td>
-                      <td style={{ padding: '10px 14px' }}>
-                        <span style={{
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          fontWeight: 800,
-                          fontSize: '0.72rem',
-                          background: m.achievePct >= 95 ? '#ecfdf5' : '#fffbeb',
-                          color: m.achievePct >= 95 ? '#059669' : '#d97706'
-                        }}>
-                          {m.achievePct}%
-                        </span>
-                      </td>
-                      <td style={{ padding: '10px 14px', color: m.downtime > 0 ? '#dc2626' : '#64748b' }}>
-                        {m.downtime}m
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
 
@@ -818,62 +970,43 @@ export default function HourlyProductionPage({
         <div style={{
           background: '#ffffff',
           borderRadius: 14,
+          padding: '24px',
           border: '1px solid #e2e8f0',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-          overflow: 'hidden'
+          boxShadow: '0 1px 3px rgba(0,0,0,0.04)'
         }}>
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
-            <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-              Operator Output Benchmarking ({selectedShift} on {activeDate})
-            </h3>
-            <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '2px 0 0' }}>
-              Comparison of parts produced, assigned machines, and target achievement per operator
-            </p>
-          </div>
+          <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#0f172a', marginBottom: 16 }}>
+            Assigned Operator Output ({activeDate} • {selectedShift})
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }}>
+            {operatorsList.map(op => {
+              const opRecs = allHourlyRecords.filter(r => r.operator_name === op.name);
+              const opTotal = opRecs.reduce((s, r) => s + (Number(r.actual_qty) || 0), 0);
+              const opTarget = opRecs.reduce((s, r) => s + (Number(r.target_qty) || 0), 0);
+              const opPct = opTarget > 0 ? Math.round((opTotal / opTarget) * 100) : 0;
 
-          {operatorComparisonList.length === 0 ? (
-            <div style={{ padding: '60px 20px', textAlign: 'center', color: '#94a3b8' }}>
-              No operator production records found for this shift.
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
-                <thead>
-                  <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Rank</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Operator Name</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Machines Manned</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Total Target</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Total Output</th>
-                    <th style={{ padding: '10px 14px', fontWeight: 800 }}>Achievement</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {operatorComparisonList.map((op, idx) => (
-                    <tr key={op.name} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#64748b' }}>#{idx + 1}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#0f172a' }}>{op.name}</td>
-                      <td style={{ padding: '10px 14px', color: '#475569' }}>{op.machineCount} unit(s)</td>
-                      <td style={{ padding: '10px 14px', color: '#64748b' }}>{op.target}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 800, color: '#1e40af' }}>{op.actual}</td>
-                      <td style={{ padding: '10px 14px' }}>
-                        <span style={{
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          fontWeight: 800,
-                          fontSize: '0.72rem',
-                          background: op.achievePct >= 95 ? '#ecfdf5' : '#fffbeb',
-                          color: op.achievePct >= 95 ? '#059669' : '#d97706'
-                        }}>
-                          {op.achievePct}%
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+              return (
+                <div key={op.emp_id} style={{ border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px', background: '#ffffff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                    <div style={{ width: 34, height: 34, borderRadius: '50%', background: '#fff7ed', color: '#ea580c', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800 }}>
+                      {op.name.charAt(0)}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 800, color: '#0f172a', fontSize: '0.88rem' }}>{op.name}</div>
+                      <div style={{ fontSize: '0.7rem', color: '#64748b' }}>{op.emp_id} • {op.designation || 'Operator'}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10 }}>
+                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Produced:</span>
+                    <strong style={{ fontSize: '0.85rem', color: '#0f172a' }}>{opTotal} units</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Cadence Achievement:</span>
+                    <strong style={{ fontSize: '0.85rem', color: opPct >= 85 ? '#16a34a' : '#ea580c' }}>{opPct}%</strong>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

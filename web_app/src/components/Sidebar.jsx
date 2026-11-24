@@ -55,6 +55,7 @@ export default function Sidebar({
     // ── SHOPFLOOR TOOLS ──
     { id: 'hourly-production', label: '⚡ Hourly Production Entry', icon: Timer, section: 'Shopfloor Entry' },
     { id: 'cell-status', label: 'Live Cell Status (OEE %)', icon: Activity, section: 'Shopfloor Entry' },
+    { id: 'machine-summary', label: '📊 Machine Summary & History', icon: Cpu, section: 'Shopfloor Entry', badge: 'NEW', badgeBg: '#ea580c', badgeColor: '#fff' },
     { id: 'plans', label: 'Tool Plans (Max 5 Plans)', icon: ClipboardList, section: 'Shopfloor Entry' },
     { id: 'nc-production', label: 'NC Presses (16 Units)', icon: Layers, section: 'Shopfloor Entry' },
     { id: 'tandem-production', label: 'Tandem Lines (6 Lines)', icon: GitBranch, section: 'Shopfloor Entry' },
@@ -70,11 +71,11 @@ export default function Sidebar({
   const userRole = (currentUser?.role || 'Supervisor').toLowerCase();
   
   const rolePermissions = {
-    admin: ['dashboard', 'employees', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'handovers', 'activity-logs', 'settings'],
-    'production manager': ['dashboard', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'activity-logs'],
-    supervisor: ['dashboard', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'hourly-production', 'cell-status', 'plans', 'nc-production', 'tandem-production', 'machines', 'handovers'],
-    management: ['dashboard', 'reports', 'production-dashboard', 'analytics', 'three-shifts', 'cell-status', 'nc-production', 'tandem-production', 'activity-logs'],
-    operator: ['dashboard', 'hourly-production', 'cell-status', 'plans', 'machines']
+    admin: ['dashboard', 'employees', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'machine-summary', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'handovers', 'activity-logs', 'settings'],
+    'production manager': ['dashboard', 'reports', 'standard-production', 'production-dashboard', 'analytics', 'hourly-production', 'cell-status', 'machine-summary', 'plans', 'nc-production', 'tandem-production', 'three-shifts', 'production-hub', 'machines', 'activity-logs'],
+    supervisor: ['dashboard', 'attendance', 'reports', 'standard-production', 'production-dashboard', 'hourly-production', 'cell-status', 'machine-summary', 'plans', 'nc-production', 'tandem-production', 'machines', 'handovers'],
+    management: ['dashboard', 'reports', 'production-dashboard', 'analytics', 'three-shifts', 'cell-status', 'machine-summary', 'nc-production', 'tandem-production', 'activity-logs'],
+    operator: ['dashboard', 'hourly-production', 'cell-status', 'machine-summary', 'plans', 'machines']
   };
 
   const allowedIds = rolePermissions[userRole] || rolePermissions.supervisor;

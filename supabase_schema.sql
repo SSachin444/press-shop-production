@@ -108,9 +108,19 @@ create table if not exists production_records (
     downtime_minutes integer not null default 0,
     downtime_reason text default '',
     remarks text default '',
+    uph numeric default 0,
+    production_pct numeric default 0,
+    hourly_output_pct numeric default 0,
+    entry_time text default '',
     created_at timestamp with time zone default timezone('utc'::text, now()),
     unique(machine_or_line, date, shift, hour_interval)
 );
+
+-- Migration for existing production_records table:
+alter table production_records add column if not exists uph numeric default 0;
+alter table production_records add column if not exists production_pct numeric default 0;
+alter table production_records add column if not exists hourly_output_pct numeric default 0;
+alter table production_records add column if not exists entry_time text default '';
 
 -- 7. Shift Handovers table
 create table if not exists shift_handovers (
@@ -183,6 +193,36 @@ create table if not exists app_settings (
     value text not null
 );
 
+-- 12. Configurable Downtime Reason Codes (Maximum 6 Codes)
+create table if not exists downtime_codes (
+    code text primary key,
+    name text not null,
+    description text default '',
+    display_order integer default 0,
+    is_active boolean default true,
+    created_at timestamp with time zone default timezone('utc'::text, now()),
+    updated_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- Migrations for machine_downtime
+alter table machine_downtime add column if not exists downtime_code text default 'D01';
+alter table machine_downtime add column if not exists operator_name text default '';
+alter table machine_downtime add column if not exists date text default '';
+alter table machine_downtime add column if not exists shift text default 'Shift A';
+
+-- Seed the 6 Configured Downtime Codes
+insert into downtime_codes (code, name, description, display_order)
+values
+    ('D01', 'Machine Breakdown', 'Mechanical or electrical failure', 1),
+    ('D02', 'Tool Problem', 'Tool wear, breakage, or die alignment', 2),
+    ('D03', 'Material Shortage', 'Raw material, blank, or coil unavailability', 3),
+    ('D04', 'Power Failure', 'Electrical grid, power outage, or generator fault', 4),
+    ('D05', 'Quality Problem', 'Defects, burr, crack, or dimensional issues', 5),
+    ('D06', 'Other Issues', 'Maintenance, safety, air pressure, or miscellaneous', 6)
+on conflict (code) do update set
+    name = excluded.name,
+    description = excluded.description;
+
 -- ========================================================================
 -- ENABLE ROW LEVEL SECURITY (RLS) & ALLOW PUBLIC ACCESS WITH ANON KEY
 -- ========================================================================
@@ -198,6 +238,7 @@ alter table machine_plans enable row level security;
 alter table machine_downtime enable row level security;
 alter table activity_logs enable row level security;
 alter table app_settings enable row level security;
+alter table downtime_codes enable row level security;
 
 -- Drop existing policies if any
 drop policy if exists "Allow anon full access to app_state" on app_state;
@@ -211,6 +252,7 @@ drop policy if exists "Allow anon full access to machine_plans" on machine_plans
 drop policy if exists "Allow anon full access to machine_downtime" on machine_downtime;
 drop policy if exists "Allow anon full access to activity_logs" on activity_logs;
 drop policy if exists "Allow anon full access to app_settings" on app_settings;
+drop policy if exists "Allow anon full access to downtime_codes" on downtime_codes;
 
 -- Create policies allowing full anon access
 create policy "Allow anon full access to app_state" on app_state for all using (true) with check (true);
@@ -224,6 +266,7 @@ create policy "Allow anon full access to machine_plans" on machine_plans for all
 create policy "Allow anon full access to machine_downtime" on machine_downtime for all using (true) with check (true);
 create policy "Allow anon full access to activity_logs" on activity_logs for all using (true) with check (true);
 create policy "Allow anon full access to app_settings" on app_settings for all using (true) with check (true);
+create policy "Allow anon full access to downtime_codes" on downtime_codes for all using (true) with check (true);
 
 -- Seed initial default 16 NC machines & 6 Tandem lines
 insert into machines (machine_number, machine_type, tonnage, production_target, status)

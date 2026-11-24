@@ -57,6 +57,7 @@ export default function MobileNavBar({
       items: [
         { id: 'hourly-production', label: 'Hourly Output Entry (Locked Target)', icon: Timer },
         { id: 'cell-status', label: 'Live Cell Status & Output %', icon: Activity },
+        { id: 'machine-summary', label: 'Machine Summary & OEE', icon: Cpu },
         { id: 'plans', label: 'Tool Plans (Max 5 per Machine)', icon: ClipboardList },
         { id: 'nc-production', label: 'NC Presses (16 Units)', icon: Layers },
         { id: 'tandem-production', label: 'Tandem Lines (6 Lines)', icon: GitBranch },

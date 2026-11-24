@@ -288,7 +288,11 @@ export async function supabaseSaveProductionRecord(record) {
     rejected_qty: Number(record.rejected_qty) || 0,
     downtime_minutes: Number(record.downtime_minutes) || 0,
     downtime_reason: record.downtime_reason || '',
-    remarks: record.remarks || ''
+    remarks: record.remarks || '',
+    uph: Number(record.uph) || 0,
+    production_pct: Number(record.production_pct) || 0,
+    hourly_output_pct: Number(record.hourly_output_pct) || 0,
+    entry_time: record.entry_time || ''
   };
   const { data, error } = await client
     .from('production_records')
@@ -296,6 +300,88 @@ export async function supabaseSaveProductionRecord(record) {
     .select();
   if (error) throw error;
   return data?.[0] || row;
+}
+
+// DOWNTIME CODES & MANAGEMENT
+export async function supabaseGetDowntimeCodes() {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  const { data, error } = await client
+    .from('downtime_codes')
+    .select('*')
+    .order('display_order', { ascending: true });
+  if (error) return null;
+  return data;
+}
+
+export async function supabaseSaveDowntimeCode(codeObj) {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  const row = {
+    code: codeObj.code,
+    name: codeObj.name,
+    description: codeObj.description || '',
+    display_order: Number(codeObj.display_order) || 1,
+    is_active: codeObj.is_active !== false,
+    updated_at: new Date().toISOString()
+  };
+  const { data, error } = await client
+    .from('downtime_codes')
+    .upsert(row, { onConflict: 'code' })
+    .select();
+  if (error) throw error;
+  return data?.[0] || row;
+}
+
+export async function supabaseGetMachineDowntime(params = {}) {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  let q = client.from('machine_downtime').select('*').order('created_at', { ascending: false });
+  if (params.machine) q = q.eq('machine_number', params.machine);
+  if (params.status) q = q.eq('status', params.status);
+  if (params.date) q = q.eq('date', params.date);
+  const { data, error } = await q;
+  if (error) return null;
+  return data;
+}
+
+export async function supabaseSaveMachineDowntime(dt) {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  const row = {
+    machine_number: dt.machine_number,
+    downtime_code: dt.downtime_code || 'D01',
+    reason: dt.reason || dt.breakdown_reason || 'Machine Breakdown',
+    operator_name: dt.operator_name || dt.reported_by || '',
+    start_time: dt.start_time || dt.breakdown_start || new Date().toISOString(),
+    end_time: dt.end_time || dt.breakdown_end || '',
+    duration_minutes: Number(dt.duration_minutes || dt.total_downtime_minutes) || 0,
+    date: dt.date || new Date().toISOString().split('T')[0],
+    shift: dt.shift || 'Shift A',
+    status: dt.status || 'Open'
+  };
+  const { data, error } = await client
+    .from('machine_downtime')
+    .insert(row)
+    .select();
+  if (error) throw error;
+  return data?.[0] || row;
+}
+
+export async function supabaseResolveMachineDowntime(id, updateData) {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  const { data, error } = await client
+    .from('machine_downtime')
+    .update({
+      status: 'Resolved',
+      end_time: updateData.end_time || new Date().toISOString(),
+      duration_minutes: Number(updateData.duration_minutes) || 0
+    })
+    .eq('id', id)
+    .select();
+  if (error) throw error;
+  return data?.[0] || null;
 }
 
 // HANDOVERS

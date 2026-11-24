@@ -1,28 +1,32 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
 
 :root {
-  --primary: #1e40af;
-  --primary-hover: #1d4ed8;
-  --primary-light: #eff6ff;
-  --primary-border: #bfdbfe;
+  --primary: #ea580c;
+  --primary-hover: #c2410c;
+  --primary-light: #fff7ed;
+  --primary-border: #fed7aa;
   
-  --secondary: #0f172a;
+  --secondary: #16a34a;
+  --secondary-hover: #15803d;
+  --secondary-light: #f0fdf4;
+  --secondary-border: #bbf7d0;
+
   --sidebar-bg: #0b1329;
   --sidebar-hover: #172554;
-  --sidebar-active: #1d4ed8;
+  --sidebar-active: #ea580c;
   --sidebar-text: #94a3b8;
   --sidebar-text-active: #ffffff;
 
   --bg-main: #f8fafc;
   --bg-card: #ffffff;
   --border-color: #e2e8f0;
-  --border-focus: #3b82f6;
+  --border-focus: #ea580c;
 
   --text-main: #0f172a;
   --text-muted: #64748b;
   --text-light: #94a3b8;
 
-  --success: #10b981;
+  --success: #16a34a;
   --success-bg: #ecfdf5;
   --success-border: #a7f3d0;
 
@@ -96,14 +100,14 @@ code, pre, .mono {
 }
 
 .pha-logo-badge {
-  background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+  background: linear-gradient(135deg, #ea580c 0%, #f97316 100%);
   color: #fff;
   font-weight: 800;
   font-size: 1.1rem;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
   letter-spacing: 0.5px;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.4);
 }
 
 .pha-brand-title {
@@ -164,7 +168,7 @@ code, pre, .mono {
   background-color: var(--sidebar-active);
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(29, 78, 216, 0.35);
+  box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);
 }
 
 .nav-badge {
@@ -271,9 +275,9 @@ code, pre, .mono {
 }
 
 .shift-pill.active-shift {
-  background: #eff6ff;
-  border-color: #93c5fd;
-  color: #1d4ed8;
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #c2410c;
 }
 
 .pulse-indicator {
@@ -505,7 +509,7 @@ code, pre, .mono {
 
 .btn-primary:hover {
   background-color: var(--primary-hover);
-  box-shadow: 0 4px 10px rgba(30, 64, 175, 0.25);
+  box-shadow: 0 4px 10px rgba(234, 88, 12, 0.25);
 }
 
 .btn-secondary {

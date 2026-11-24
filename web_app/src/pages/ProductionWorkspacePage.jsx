@@ -168,12 +168,12 @@ export default function ProductionWorkspacePage({
           }}
         >
           <PanelHeader
-            title="Standard Production Entry"
-            subtitle="NC Presses (16 units) + Tandem Lines (6 lines)"
-            badge="PAGE 1"
-            badgeBg="#172554"
-            badgeColor="#93c5fd"
-            icon={<Layers size={15} color="#60a5fa" />}
+            title="Overall Production Summary"
+            subtitle="Auto-calculated from hourly entries • Shift & Daily totals"
+            badge="OVERALL"
+            badgeBg="#fff7ed"
+            badgeColor="#ea580c"
+            icon={<Layers size={15} color="#ea580c" />}
             isFocused={leftFocus}
             onToggleFocus={() => { setLeftFocus(!leftFocus); if (!leftFocus) setRightFocus(false); }}
           />

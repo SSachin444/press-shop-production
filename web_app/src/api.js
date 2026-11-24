@@ -19,7 +19,21 @@ import {
   supabaseSavePlan,
   supabaseGetActivityLogs,
   supabaseLogActivity,
+  supabaseGetDowntimeCodes,
+  supabaseSaveDowntimeCode,
+  supabaseGetMachineDowntime,
+  supabaseSaveMachineDowntime,
+  supabaseResolveMachineDowntime
 } from './supabase';
+
+export const DEFAULT_DOWNTIME_CODES = [
+  { code: 'D01', name: 'Machine Breakdown', description: 'Mechanical or electrical failure', display_order: 1, is_active: true },
+  { code: 'D02', name: 'Tool Problem', description: 'Tool wear, breakage, or die alignment', display_order: 2, is_active: true },
+  { code: 'D03', name: 'Material Shortage', description: 'Raw material, blank, or coil unavailability', display_order: 3, is_active: true },
+  { code: 'D04', name: 'Power Failure', description: 'Electrical grid, power outage, or generator fault', display_order: 4, is_active: true },
+  { code: 'D05', name: 'Quality Problem', description: 'Defects, burr, crack, or dimensional issues', display_order: 5, is_active: true },
+  { code: 'D06', name: 'Other Issues', description: 'Maintenance, safety, air pressure, or miscellaneous', display_order: 6, is_active: true }
+];
 
 export const DEFAULT_SERVER_URL = 'http://10.50.67.50:5000';
 
@@ -160,6 +174,9 @@ function sanitizeStore(store) {
   if (!Array.isArray(store.shift_handovers)) store.shift_handovers = [];
   if (!Array.isArray(store.machine_downtime)) store.machine_downtime = [];
   if (!Array.isArray(store.activity_logs)) store.activity_logs = [];
+  if (!Array.isArray(store.downtime_codes) || store.downtime_codes.length === 0) {
+    store.downtime_codes = DEFAULT_DOWNTIME_CODES;
+  }
 
   return store;
 }
@@ -183,6 +200,7 @@ export function getLocalStore() {
     machine_plans: [],
     shift_handovers: [],
     machine_downtime: [],
+    downtime_codes: DEFAULT_DOWNTIME_CODES,
     activity_logs: [
       {
         id: 1,
@@ -527,7 +545,7 @@ export const api = {
   },
 
   // ==========================================================================
-  // CELL STATUS: OEE and Output Percentages for Each Machine
+  // CELL STATUS: Professional 2-Circle Progress Indicators (Total & Hourly %)
   // ==========================================================================
   getCellStatus: async (date, shift, type = 'ALL') => {
     try {
@@ -535,80 +553,113 @@ export const api = {
       if (date) params.append('date', date);
       if (shift) params.append('shift', shift);
       if (type) params.append('type', type);
-      return await request(`/dashboard/cell-status?${params.toString()}`);
-    } catch (e) {
-      const store = getLocalStore();
-      const targetDate = date || new Date().toISOString().split('T')[0];
-      const targetShift = shift || 'Shift A';
+      const res = await request(`/dashboard/cell-status?${params.toString()}`);
+      if (res && res.machines && res.machines.length > 0) {
+        return res;
+      }
+    } catch (e) {}
 
-      const shiftRecs = (store.production_records || []).filter(
-        (r) => r.date === targetDate && (!shift || r.shift === targetShift)
+    // Verified Local & Cloud Calculation Layer
+    const store = getLocalStore();
+    const targetDate = date || new Date().toISOString().split('T')[0];
+    const targetShift = shift || 'Shift A';
+
+    const shiftRecs = (store.production_records || []).filter(
+      (r) => r.date === targetDate && (!shift || r.shift === targetShift)
+    );
+
+    const allMachines = store.machines || DEFAULT_MACHINES;
+    const filtered = allMachines.filter(
+      (m) => type === 'ALL' || m.machine_type === type
+    );
+
+    const openDowntimes = (store.machine_downtime || []).filter(d => d.status === 'Open');
+
+    const machines = filtered.map((m) => {
+      const mRecs = shiftRecs.filter(
+        (r) => r.machine_or_line === m.machine_number || r.machine === m.machine_number
       );
+      
+      // Sort by hour interval or id
+      mRecs.sort((a, b) => (a.hour_interval || '').localeCompare(b.hour_interval || '') || (a.id || 0) - (b.id || 0));
 
-      const allMachines = store.machines || DEFAULT_MACHINES;
-      const filtered = allMachines.filter(
-        (m) => type === 'ALL' || m.machine_type === type
-      );
+      const totalActual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const totalTargetSum = mRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+      const defaultTarget = Number(m.production_target) || 500;
+      const totalTarget = totalTargetSum > 0 ? totalTargetSum : defaultTarget;
 
-      const machines = filtered.map((m) => {
-        const mRecs = shiftRecs.filter(
-          (r) => r.machine_or_line === m.machine_number || r.machine === m.machine_number
-        );
-        const actual = mRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
-        const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
-        const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
-        const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
-        const target = Number(m.production_target) || 500;
-        const perf = target > 0 ? Math.round((actual / target) * 100) : 0;
-        const qual = actual > 0 ? Math.round(((actual - rej) / actual) * 100) : 100;
-        const avail = m.status === 'Running' ? 100 : (m.status === 'Maintenance' ? 60 : 0);
-        const oee = Math.round((perf * (qual / 100) * (avail / 100)));
+      // Circle 1: Total Output Percentage (Actual production vs calculated target)
+      const totalOutputPct = totalTarget > 0 ? Math.round((totalActual / totalTarget) * 100) : 0;
 
-        return {
-          machine_number: m.machine_number,
-          machine_type: m.machine_type,
-          tonnage: m.tonnage || 0,
-          target: target,
-          actual: actual,
-          good: good,
-          rejected: rej,
-          downtime: dt,
-          status: m.status || 'Running',
-          operator: m.assigned_operator || 'Line Operator',
-          achievement_pct: perf,
-          performance: perf,
-          quality: qual,
-          availability: avail,
-          oee: oee
-        };
-      });
+      // Circle 2: Hourly Output Percentage (Actual hourly output vs hourly target)
+      const latestRec = mRecs.length > 0 ? mRecs[mRecs.length - 1] : null;
+      const hourlyActual = latestRec ? (Number(latestRec.actual_qty) || 0) : 0;
+      const hourlyTarget = latestRec ? (Number(latestRec.target_qty) || Math.round(totalTarget / 8)) : Math.round(totalTarget / 8);
+      const hourlyOutputPct = hourlyTarget > 0 ? Math.round((hourlyActual / hourlyTarget) * 100) : 0;
 
-      const ticker = machines.map((m) => ({
-        name: m.machine_number,
-        pct: `${m.performance}%`,
-        status: m.performance >= 85 ? 'green' : m.performance >= 70 ? 'yellow' : m.performance > 0 ? 'red' : 'gray'
-      }));
+      const good = mRecs.reduce((sum, r) => sum + (Number(r.good_qty) || 0), 0);
+      const rej = mRecs.reduce((sum, r) => sum + (Number(r.rejected_qty) || 0), 0);
+      const dt = mRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
 
-      // Downtime Pareto
-      const dtReasons = {};
-      shiftRecs.forEach((r) => {
-        if (r.downtime_minutes > 0) {
-          const reason = r.downtime_reason || 'General Downtime';
-          dtReasons[reason] = (dtReasons[reason] || 0) + Number(r.downtime_minutes);
-        }
-      });
-      const downtime_pareto = Object.entries(dtReasons).map(([reason, minutes]) => ({
-        reason,
-        minutes
-      }));
+      // Check active downtime
+      const activeDt = openDowntimes.find(d => (d.machine_number || '').toUpperCase() === m.machine_number.toUpperCase());
+      const isStopped = Boolean(activeDt);
+      const machineStatus = isStopped ? 'Breakdown' : (m.status || (totalActual > 0 ? 'Running' : 'Idle'));
+
+      const operatorName = (latestRec && latestRec.operator_name) || m.assigned_operator || 'Line Operator';
+      const currentTool = (latestRec && latestRec.tool_number) || 'TL-1001';
 
       return {
-        machines,
-        cells: machines,
-        ticker,
-        downtime_pareto
+        machine_number: m.machine_number,
+        machine_type: m.machine_type,
+        tonnage: m.tonnage || 0,
+        target: totalTarget,
+        actual: totalActual,
+        good: good,
+        rejected: rej,
+        downtime: dt,
+        status: machineStatus,
+        is_stopped: isStopped,
+        active_downtime: activeDt || null,
+        operator: operatorName,
+        operator_name: operatorName,
+        tool_number: currentTool,
+        // Two Prominent Circular Progress Indicators
+        total_output_pct: totalOutputPct,
+        hourly_output_pct: hourlyOutputPct,
+        hourly_actual: hourlyActual,
+        hourly_target: hourlyTarget,
+        achievement_pct: totalOutputPct,
+        performance: totalOutputPct
       };
-    }
+    });
+
+    const ticker = machines.map((m) => ({
+      name: m.machine_number,
+      pct: `${m.total_output_pct}%`,
+      hourly_pct: `${m.hourly_output_pct}%`,
+      status: m.total_output_pct >= 85 ? 'green' : 'orange'
+    }));
+
+    // Downtime Pareto
+    const dtReasons = {};
+    shiftRecs.forEach((r) => {
+      if (r.downtime_minutes > 0) {
+        const reason = r.downtime_reason || 'General Downtime';
+        dtReasons[reason] = (dtReasons[reason] || 0) + Number(r.downtime_minutes);
+      }
+    });
+    const downtime_pareto = Object.entries(dtReasons).map(([reason, minutes]) => ({
+      reason,
+      minutes
+    }));
+
+    return {
+      machines,
+      cells: machines,
+      ticker,
+      downtime_pareto
+    };
   },
 
   // ==========================================================================
@@ -978,25 +1029,145 @@ export const api = {
     }
   },
 
+  // ==========================================================================
+  // DOWNTIME CODES MANAGEMENT (MAX 6 CONFIGURABLE CODES)
+  // ==========================================================================
+  getDowntimeCodes: async () => {
+    try {
+      const res = await request('/downtime-codes');
+      if (res && res.codes && res.codes.length > 0) return res;
+    } catch (e) {}
+
+    if (isSupabaseConfigured()) {
+      try {
+        const cloud = await supabaseGetDowntimeCodes();
+        if (cloud && cloud.length > 0) return { success: true, codes: cloud };
+      } catch (err) {}
+    }
+
+    const store = getLocalStore();
+    return { success: true, codes: store.downtime_codes || DEFAULT_DOWNTIME_CODES };
+  },
+
+  saveDowntimeCodes: async (codes) => {
+    const store = getLocalStore();
+    store.downtime_codes = (codes || []).slice(0, 6);
+    saveLocalStore(store);
+    triggerCloudSync();
+
+    if (isSupabaseConfigured()) {
+      for (const c of store.downtime_codes) {
+        supabaseSaveDowntimeCode(c).catch(console.warn);
+      }
+    }
+
+    try {
+      return await request('/downtime-codes', { method: 'POST', body: JSON.stringify({ codes: store.downtime_codes }) });
+    } catch (e) {
+      return { success: true, codes: store.downtime_codes };
+    }
+  },
+
+  updateDowntimeCode: async (code, updateData) => {
+    const store = getLocalStore();
+    store.downtime_codes = (store.downtime_codes || DEFAULT_DOWNTIME_CODES).map((c) =>
+      c.code === code ? { ...c, ...updateData } : c
+    );
+    saveLocalStore(store);
+    triggerCloudSync();
+
+    if (isSupabaseConfigured()) {
+      const target = store.downtime_codes.find(c => c.code === code);
+      if (target) supabaseSaveDowntimeCode(target).catch(console.warn);
+    }
+
+    try {
+      return await request('/downtime-codes', { method: 'POST', body: JSON.stringify({ codes: store.downtime_codes }) });
+    } catch (e) {
+      return { success: true };
+    }
+  },
+
   getMachineDowntime: async (params = {}) => {
     try {
       const q = new URLSearchParams(params).toString();
-      return await request(`/machine-downtime${q ? '?' + q : ''}`);
-    } catch (e) {
-      const store = getLocalStore();
-      return { downtime_records: store.machine_downtime || [] };
+      const res = await request(`/machine-downtime${q ? '?' + q : ''}`);
+      if (res && res.downtimes) return { downtime_records: res.downtimes };
+    } catch (e) {}
+
+    if (isSupabaseConfigured()) {
+      try {
+        const cloud = await supabaseGetMachineDowntime(params);
+        if (cloud) return { downtime_records: cloud };
+      } catch (err) {}
     }
+
+    const store = getLocalStore();
+    let records = store.machine_downtime || [];
+    if (params.machine) {
+      const m = params.machine.toUpperCase();
+      records = records.filter(r => (r.machine_number || '').toUpperCase() === m);
+    }
+    if (params.status) {
+      records = records.filter(r => r.status === params.status);
+    }
+    if (params.date) {
+      records = records.filter(r => r.date === params.date);
+    }
+    return { downtime_records: records };
   },
 
   saveMachineDowntime: async (data) => {
     const store = getLocalStore();
-    const newDt = { ...data, id: Date.now(), created_at: new Date().toISOString() };
+    const mNum = (data.machine_number || '').trim().toUpperCase();
+
+    // Prevent duplicate overlapping downtime for the same machine
+    const openActive = (store.machine_downtime || []).find(
+      d => (d.machine_number || '').toUpperCase() === mNum && d.status === 'Open'
+    );
+    if (openActive && data.status !== 'Resolved') {
+      throw new Error(`Machine ${mNum} already has an active downtime record (${openActive.downtime_code || 'D01'} - ${openActive.reason || openActive.breakdown_reason}). Please resolve or resume before starting a new downtime.`);
+    }
+
+    const nowIso = new Date().toISOString();
+    const newDt = {
+      ...data,
+      id: Date.now(),
+      machine_number: mNum,
+      downtime_code: data.downtime_code || 'D01',
+      reason: data.reason || data.breakdown_reason || 'Machine Breakdown',
+      operator_name: data.operator_name || data.reported_by || '',
+      reported_by: data.operator_name || data.reported_by || '',
+      start_time: data.start_time || data.breakdown_start || nowIso,
+      breakdown_start: data.start_time || data.breakdown_start || nowIso,
+      end_time: data.end_time || '',
+      breakdown_end: data.end_time || '',
+      duration_minutes: Number(data.duration_minutes || data.total_downtime_minutes) || 0,
+      total_downtime_minutes: Number(data.duration_minutes || data.total_downtime_minutes) || 0,
+      date: data.date || new Date().toISOString().split('T')[0],
+      shift: data.shift || 'Shift A',
+      status: data.status || 'Open',
+      created_at: nowIso
+    };
+
     store.machine_downtime = [newDt, ...(store.machine_downtime || [])];
+
+    // Set machine status to Breakdown if downtime is open
+    if (newDt.status === 'Open') {
+      store.machines = (store.machines || DEFAULT_MACHINES).map(m =>
+        m.machine_number === mNum ? { ...m, status: 'Breakdown' } : m
+      );
+    }
+
     saveLocalStore(store);
     triggerCloudSync();
 
+    if (isSupabaseConfigured()) {
+      supabaseSaveMachineDowntime(newDt).catch(console.warn);
+    }
+
     try {
-      return await request('/machine-downtime', { method: 'POST', body: JSON.stringify(data) });
+      return await request('/machine-downtime', { method: 'POST', body: JSON.stringify(newDt) });
     } catch (e) {
       return { status: 'success', record: newDt };
     }
@@ -1004,11 +1175,53 @@ export const api = {
 
   resolveMachineDowntime: async (id, data = {}) => {
     const store = getLocalStore();
-    store.machine_downtime = (store.machine_downtime || []).map((d) =>
-      d.id === id ? { ...d, ...data, status: 'Resolved' } : d
-    );
+    let resolvedMachine = '';
+    const nowIso = new Date().toISOString();
+
+    store.machine_downtime = (store.machine_downtime || []).map((d) => {
+      if (d.id === id) {
+        resolvedMachine = d.machine_number;
+        const endTime = data.end_time || nowIso;
+        let duration = Number(data.duration_minutes || data.total_downtime_minutes) || 0;
+        if (duration === 0 && (d.start_time || d.breakdown_start)) {
+          const startTimeStr = d.start_time || d.breakdown_start;
+          try {
+            const t1 = new Date(startTimeStr).getTime();
+            const t2 = new Date(endTime).getTime();
+            if (t2 > t1) {
+              duration = Math.max(1, Math.round((t2 - t1) / 60000));
+            } else {
+              duration = 15;
+            }
+          } catch (err) {
+            duration = 15;
+          }
+        }
+        return {
+          ...d,
+          ...data,
+          status: 'Resolved',
+          end_time: endTime,
+          breakdown_end: endTime,
+          duration_minutes: duration,
+          total_downtime_minutes: duration
+        };
+      }
+      return d;
+    });
+
+    if (resolvedMachine) {
+      store.machines = (store.machines || DEFAULT_MACHINES).map(m =>
+        m.machine_number === resolvedMachine ? { ...m, status: 'Running' } : m
+      );
+    }
+
     saveLocalStore(store);
     triggerCloudSync();
+
+    if (isSupabaseConfigured()) {
+      supabaseResolveMachineDowntime(id, data).catch(console.warn);
+    }
 
     try {
       return await request(`/machine-downtime/${id}/resolve`, { method: 'PUT', body: JSON.stringify(data) });
@@ -1018,7 +1231,7 @@ export const api = {
   },
 
   // ==========================================================================
-  // PRODUCTION RECORDS & HOURLY TRACKING
+  // PRODUCTION RECORDS & HOURLY TRACKING (UPH-BASED)
   // ==========================================================================
   getProductionRecords: async (params = {}) => {
     try {
@@ -1034,8 +1247,8 @@ export const api = {
       if (params.date) records = records.filter((r) => r.date === params.date);
       if (params.shift) records = records.filter((r) => r.shift === params.shift);
       if (params.machine || params.machine_or_line) {
-        const targetM = params.machine || params.machine_or_line;
-        records = records.filter((r) => r.machine_or_line === targetM);
+        const targetM = (params.machine || params.machine_or_line).toUpperCase();
+        records = records.filter((r) => (r.machine_or_line || '').toUpperCase() === targetM);
       }
       if (params.type || params.production_type) {
         const targetT = params.type || params.production_type;
@@ -1047,12 +1260,57 @@ export const api = {
 
   saveProductionRecord: async (prodData) => {
     const store = getLocalStore();
+
+    // NC Machine UPH Calculation: Target Production = UPH × 60
+    let uph = 0;
+    if (prodData.uph !== undefined && prodData.uph !== null && prodData.uph !== '') {
+      uph = Number(prodData.uph) || 0;
+    }
+
+    let targetQty = Number(prodData.target_qty) || 0;
+    if (uph > 0) {
+      targetQty = Math.round(uph * 60);
+    }
+
+    const actualQty = Number(prodData.actual_qty) || 0;
+    const productionPct = targetQty > 0 ? Number(((actualQty / targetQty) * 100).toFixed(1)) : 0;
+    const hourlyOutputPct = targetQty > 0 ? Number(((actualQty / targetQty) * 100).toFixed(1)) : 0;
+    const entryTime = prodData.entry_time || new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
     const rec = {
       ...prodData,
-      id: Date.now(),
-      created_at: new Date().toISOString()
+      uph: uph,
+      target_qty: targetQty,
+      actual_qty: actualQty,
+      production_pct: productionPct,
+      hourly_output_pct: hourlyOutputPct,
+      entry_time: entryTime,
+      id: prodData.id || Date.now(),
+      created_at: prodData.created_at || new Date().toISOString()
     };
-    store.production_records = [rec, ...(store.production_records || [])];
+
+    // Replace if exact match on (machine_or_line, date, shift, hour_interval), else prepend
+    const mNum = (rec.machine_or_line || '').toUpperCase();
+    const existingIdx = (store.production_records || []).findIndex(
+      r => (r.machine_or_line || '').toUpperCase() === mNum &&
+           r.date === rec.date &&
+           r.shift === rec.shift &&
+           r.hour_interval === rec.hour_interval
+    );
+
+    if (existingIdx >= 0) {
+      store.production_records[existingIdx] = { ...store.production_records[existingIdx], ...rec };
+    } else {
+      store.production_records = [rec, ...(store.production_records || [])];
+    }
+
+    // Keep machine status alive
+    store.machines = (store.machines || DEFAULT_MACHINES).map(m =>
+      m.machine_number.toUpperCase() === mNum
+        ? { ...m, assigned_operator: rec.operator_name || m.assigned_operator, status: 'Running' }
+        : m
+    );
+
     saveLocalStore(store);
     triggerCloudSync();
 
@@ -1061,7 +1319,7 @@ export const api = {
     }
 
     try {
-      return await request('/production/records', { method: 'POST', body: JSON.stringify(prodData) });
+      return await request('/production/hourly', { method: 'POST', body: JSON.stringify(rec) });
     } catch (e) {
       return { status: 'success', record: rec };
     }
@@ -1105,7 +1363,7 @@ export const api = {
         (r) =>
           (!params.date || r.date === params.date) &&
           (!params.shift || r.shift === params.shift) &&
-          (!params.machine || r.machine_or_line === params.machine)
+          (!params.machine || (r.machine_or_line || '').toUpperCase() === params.machine.toUpperCase())
       );
       return { records };
     }
@@ -1113,6 +1371,285 @@ export const api = {
 
   saveHourlyProduction: async (prodData) => {
     return api.saveProductionRecord(prodData);
+  },
+
+  // ==========================================================================
+  // AUTOMATIC OVERALL PRODUCTION (Calculated strictly from hourly records)
+  // ==========================================================================
+  getOverallProductionSummary: async (targetDate, targetShift = 'ALL') => {
+    const store = getLocalStore();
+    const activeDate = targetDate || new Date().toISOString().split('T')[0];
+
+    const allRecs = (store.production_records || []).filter(r => r.date === activeDate);
+    
+    // Shift aggregates
+    const shifts = ['Shift A', 'Shift B', 'Shift C'];
+    const shiftSummary = {};
+
+    shifts.forEach(s => {
+      const sRecs = allRecs.filter(r => r.shift === s);
+      const actual = sRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const target = sRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+      const dt = sRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+      shiftSummary[s] = {
+        actual,
+        target,
+        downtime_minutes: dt,
+        achievement_pct: target > 0 ? Number(((actual / target) * 100).toFixed(1)) : 0
+      };
+    });
+
+    const relevantRecs = targetShift && targetShift !== 'ALL'
+      ? allRecs.filter(r => r.shift === targetShift)
+      : allRecs;
+
+    const totalActual = relevantRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+    const totalTarget = relevantRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+    const totalDowntime = relevantRecs.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
+    const achievementPct = totalTarget > 0 ? Number(((totalActual / totalTarget) * 100).toFixed(1)) : 0;
+
+    // Machine-wise aggregation without duplicate counting
+    const machineMap = {};
+    (store.machines || DEFAULT_MACHINES).forEach(m => {
+      machineMap[m.machine_number] = {
+        machine_number: m.machine_number,
+        machine_type: m.machine_type,
+        tonnage: m.tonnage,
+        target: 0,
+        actual: 0,
+        downtime_minutes: 0,
+        operator: m.assigned_operator || '',
+        tool_number: ''
+      };
+    });
+
+    relevantRecs.forEach(r => {
+      const mNum = r.machine_or_line || r.machine;
+      if (!machineMap[mNum]) {
+        machineMap[mNum] = {
+          machine_number: mNum,
+          machine_type: r.production_type || 'NC',
+          tonnage: r.tonnage || 0,
+          target: 0,
+          actual: 0,
+          downtime_minutes: 0,
+          operator: '',
+          tool_number: ''
+        };
+      }
+      machineMap[mNum].target += Number(r.target_qty) || 0;
+      machineMap[mNum].actual += Number(r.actual_qty) || 0;
+      machineMap[mNum].downtime_minutes += Number(r.downtime_minutes) || 0;
+      if (r.operator_name) machineMap[mNum].operator = r.operator_name;
+      if (r.tool_number) machineMap[mNum].tool_number = r.tool_number;
+    });
+
+    const machineList = Object.values(machineMap).map(m => ({
+      ...m,
+      achievement_pct: m.target > 0 ? Number(((m.actual / m.target) * 100).toFixed(1)) : 0
+    }));
+
+    return {
+      date: activeDate,
+      shift: targetShift,
+      total_actual: totalActual,
+      total_target: totalTarget,
+      total_downtime_minutes: totalDowntime,
+      achievement_pct: achievementPct,
+      shifts: shiftSummary,
+      machines: machineList
+    };
+  },
+
+  // ==========================================================================
+  // DEDICATED MACHINE SUMMARY REPORT GENERATOR
+  // ==========================================================================
+  getMachineSummary: async (machineNumber, targetDate, targetShift = 'Shift A') => {
+    const store = getLocalStore();
+    const activeDate = targetDate || new Date().toISOString().split('T')[0];
+    const mNum = (machineNumber || 'NC-01').toUpperCase();
+
+    const machine = (store.machines || DEFAULT_MACHINES).find(
+      m => m.machine_number.toUpperCase() === mNum
+    ) || { machine_number: mNum, machine_type: 'NC', tonnage: 500, status: 'Running', assigned_operator: '' };
+
+    // Records for this machine
+    const allMachineRecs = (store.production_records || []).filter(
+      r => (r.machine_or_line || r.machine || '').toUpperCase() === mNum
+    );
+
+    const dateRecs = allMachineRecs.filter(r => r.date === activeDate);
+    const shiftRecs = dateRecs.filter(r => !targetShift || r.shift === targetShift);
+
+    // Latest active hour record
+    const latestRec = shiftRecs.length > 0 ? shiftRecs[shiftRecs.length - 1] : (dateRecs[dateRecs.length - 1] || null);
+
+    // Section A: Machine Information
+    const currentOperator = (latestRec && latestRec.operator_name) || machine.assigned_operator || 'Line Operator';
+    const currentTool = (latestRec && latestRec.tool_number) || 'TL-1001';
+
+    // Active downtime check
+    const openDowntime = (store.machine_downtime || []).find(
+      d => (d.machine_number || '').toUpperCase() === mNum && d.status === 'Open'
+    );
+    const currentStatus = openDowntime ? 'Breakdown' : (machine.status || (latestRec ? 'Running' : 'Idle'));
+
+    // Section B: Production Details
+    const shiftActual = shiftRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+    const shiftTargetSum = shiftRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+    const shiftTarget = shiftTargetSum > 0 ? shiftTargetSum : (Number(machine.production_target) || 500);
+    const shiftAchievementPct = shiftTarget > 0 ? Number(((shiftActual / shiftTarget) * 100).toFixed(1)) : 0;
+
+    const dailyActual = dateRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+    const dailyTarget = dateRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+
+    const totalLifetimeActual = allMachineRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+    const totalLifetimeTarget = allMachineRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+
+    // Hourly breakdown for 8 hours
+    const hourLabels = [
+      'Hour 1 (08:00 - 09:00)',
+      'Hour 2 (09:00 - 10:00)',
+      'Hour 3 (10:00 - 11:00)',
+      'Hour 4 (11:00 - 12:00)',
+      'Hour 5 (12:30 - 13:30)',
+      'Hour 6 (13:30 - 14:30)',
+      'Hour 7 (14:30 - 15:30)',
+      'Hour 8 (15:30 - 16:30)'
+    ];
+
+    const hourlyBreakdown = hourLabels.map((lbl, idx) => {
+      const hNum = `Hour ${idx + 1}`;
+      const rec = shiftRecs.find(r => (r.hour_interval || '').includes(hNum) || (r.hour_interval || '') === lbl);
+      const actual = rec ? Number(rec.actual_qty) || 0 : 0;
+      const uph = rec ? Number(rec.uph) || 0 : 0;
+      const target = rec ? Number(rec.target_qty) || (uph > 0 ? uph * 60 : 75) : 75;
+      const pct = target > 0 ? Number(((actual / target) * 100).toFixed(1)) : 0;
+      return {
+        hour_num: idx + 1,
+        hour_interval: lbl,
+        tool_number: rec?.tool_number || currentTool,
+        operator_name: rec?.operator_name || currentOperator,
+        uph: uph,
+        target_qty: target,
+        actual_qty: actual,
+        production_pct: pct,
+        hourly_output_pct: pct,
+        downtime_minutes: rec ? Number(rec.downtime_minutes) || 0 : 0,
+        downtime_reason: rec?.downtime_reason || '',
+        entry_time: rec?.entry_time || '',
+        is_logged: Boolean(rec)
+      };
+    });
+
+    // Shift-wise breakdown
+    const shiftBreakdown = {
+      'Shift A': { actual: 0, target: 0, pct: 0 },
+      'Shift B': { actual: 0, target: 0, pct: 0 },
+      'Shift C': { actual: 0, target: 0, pct: 0 }
+    };
+    ['Shift A', 'Shift B', 'Shift C'].forEach(s => {
+      const sRecs = dateRecs.filter(r => r.shift === s);
+      const act = sRecs.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+      const tgt = sRecs.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+      shiftBreakdown[s] = {
+        actual: act,
+        target: tgt,
+        pct: tgt > 0 ? Number(((act / tgt) * 100).toFixed(1)) : 0
+      };
+    });
+
+    // Section C: Machine Running & Downtime Details (Actual calculated records)
+    const machineDowntimes = (store.machine_downtime || []).filter(
+      d => (d.machine_number || '').toUpperCase() === mNum
+    );
+    const dateDowntimes = machineDowntimes.filter(d => !d.date || d.date === activeDate);
+    const totalDowntimeMinutes = dateDowntimes.reduce(
+      (sum, d) => sum + (Number(d.duration_minutes || d.total_downtime_minutes) || 0),
+      0
+    );
+    const totalDowntimeHours = Number((totalDowntimeMinutes / 60).toFixed(2));
+    const totalAvailableHours = 8.0; // 8-hour shift standard
+    const totalRunningHours = Math.max(0, Number((totalAvailableHours - totalDowntimeHours).toFixed(2)));
+    const utilizationPct = totalAvailableHours > 0
+      ? Math.min(100, Math.round((totalRunningHours / totalAvailableHours) * 100))
+      : 0;
+
+    // Section D: Tool Details (All tools used on this machine)
+    const toolMap = {};
+    allMachineRecs.forEach(r => {
+      const tNum = r.tool_number || 'TL-1001';
+      if (!toolMap[tNum]) {
+        toolMap[tNum] = {
+          tool_number: tNum,
+          operator_name: r.operator_name || currentOperator,
+          production_quantity: 0,
+          target_quantity: 0,
+          completed_quantity: 0,
+          completion_status: 'Completed',
+          start_time: r.created_at || r.entry_time || '',
+          completion_time: r.created_at || '',
+          history: []
+        };
+      }
+      toolMap[tNum].production_quantity += Number(r.actual_qty) || 0;
+      toolMap[tNum].target_quantity += Number(r.target_qty) || 0;
+      toolMap[tNum].completed_quantity = toolMap[tNum].production_quantity;
+      toolMap[tNum].history.push(r);
+    });
+
+    // Tag the currently active tool
+    if (toolMap[currentTool]) {
+      toolMap[currentTool].completion_status = currentStatus === 'Running' ? 'Running' : 'Pending';
+    }
+
+    const toolsList = Object.values(toolMap);
+    const completedToolsCount = toolsList.filter(t => t.completion_status === 'Completed').length;
+
+    // Section E: Problems and Downtime List
+    const downtimeReasonsSummary = {};
+    dateDowntimes.forEach(d => {
+      const reasonKey = `${d.downtime_code || 'D01'} - ${d.reason || d.breakdown_reason || 'General'}`;
+      const mins = Number(d.duration_minutes || d.total_downtime_minutes) || 0;
+      downtimeReasonsSummary[reasonKey] = (downtimeReasonsSummary[reasonKey] || 0) + mins;
+    });
+
+    return {
+      machine_info: {
+        machine_number: machine.machine_number,
+        machine_type: machine.machine_type,
+        tonnage: machine.tonnage,
+        current_shift: targetShift,
+        current_operator_name: currentOperator,
+        current_tool_number: currentTool,
+        current_machine_status: currentStatus,
+        is_stopped: Boolean(openDowntime),
+        active_downtime: openDowntime || null
+      },
+      production_details: {
+        total_production: shiftActual,
+        total_target_production: shiftTarget,
+        production_achievement_percentage: shiftAchievementPct,
+        hourly_breakdown: hourlyBreakdown,
+        shift_wise_production: shiftBreakdown,
+        daily_production: { actual: dailyActual, target: dailyTarget },
+        total_lifetime_production: totalLifetimeActual,
+        number_of_completed_tools: completedToolsCount
+      },
+      running_details: {
+        total_running_hours: totalRunningHours,
+        total_downtime_hours: totalDowntimeHours,
+        total_downtime_minutes: totalDowntimeMinutes,
+        total_available_hours: totalAvailableHours,
+        machine_utilization_percentage: utilizationPct,
+        running_status: currentStatus
+      },
+      tool_details: toolsList,
+      problems_and_downtime: {
+        records: dateDowntimes,
+        summary_by_reason: downtimeReasonsSummary
+      }
+    };
   },
 
   getShiftComparison: async (date) => {

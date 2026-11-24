@@ -14,9 +14,10 @@ import {
   GitBranch,
   ArrowRight,
   TrendingUp,
-  AlertTriangle
+  AlertTriangle,
+  Zap
 } from 'lucide-react';
-import { api } from '../api';
+import { api, DEFAULT_DOWNTIME_CODES } from '../api';
 
 export default function HourlyProductionEntry({ 
   selectedDate, 
@@ -26,48 +27,59 @@ export default function HourlyProductionEntry({
 }) {
   const activeDate = selectedDate || new Date().toISOString().split('T')[0];
 
-  // Selection states (as explicitly requested)
+  // Core Form State
   const [selectedMachine, setSelectedMachine] = useState(initialMachine);
-  const [toolNumber, setToolNumber] = useState('TL-1002-CTR');
+  const [toolNumber, setToolNumber] = useState('TL-1001-CTR');
   const [selectedOperator, setSelectedOperator] = useState('');
   const [selectedHour, setSelectedHour] = useState('Hour 1');
-  const [targetQty, setTargetQty] = useState(75);
-  const [actualQty, setActualQty] = useState(70);
+  
+  // UPH (Units Per Hour): Target = UPH × 60 for NC machines
+  const [uphValue, setUphValue] = useState(10);
+  const [calculatedTarget, setCalculatedTarget] = useState(600);
+  const [actualQty, setActualQty] = useState(0);
 
   // Quality & Downtime
   const [rejectedQty, setRejectedQty] = useState(0);
   const [downtimeMinutes, setDowntimeMinutes] = useState(0);
-  const [downtimeReason, setDowntimeReason] = useState('');
+  const [downtimeCode, setDowntimeCode] = useState('D01');
+  const [downtimeReason, setDowntimeReason] = useState('Machine Breakdown');
   const [remarks, setRemarks] = useState('');
 
-  // Dropdown options loaded from existing database records
+  // Dropdown options
   const [machinesList, setMachinesList] = useState([]);
   const [operatorsList, setOperatorsList] = useState([]);
   const [toolOptions, setToolOptions] = useState([]);
+  const [downtimeCodes, setDowntimeCodes] = useState(DEFAULT_DOWNTIME_CODES);
 
-  // 8-hour production records matrix
+  // 8-hour production records
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [notification, setNotification] = useState(null);
 
   const hoursList = [
-    { key: 'Hour 1', label: 'Hour 1 (06:00 - 07:00)', shortLabel: '1st Hour' },
-    { key: 'Hour 2', label: 'Hour 2 (07:00 - 08:00)', shortLabel: '2nd Hour' },
-    { key: 'Hour 3', label: 'Hour 3 (08:00 - 09:00)', shortLabel: '3rd Hour' },
-    { key: 'Hour 4', label: 'Hour 4 (09:00 - 10:00)', shortLabel: '4th Hour' },
-    { key: 'Hour 5', label: 'Hour 5 (10:00 - 11:00)', shortLabel: '5th Hour' },
-    { key: 'Hour 6', label: 'Hour 6 (11:00 - 12:00)', shortLabel: '6th Hour' },
-    { key: 'Hour 7', label: 'Hour 7 (12:00 - 13:00)', shortLabel: '7th Hour' },
-    { key: 'Hour 8', label: 'Hour 8 (13:00 - 14:00)', shortLabel: '8th Hour' }
+    { key: 'Hour 1', label: 'Hour 1 (08:00 - 09:00)', shortLabel: '1st Hr' },
+    { key: 'Hour 2', label: 'Hour 2 (09:00 - 10:00)', shortLabel: '2nd Hr' },
+    { key: 'Hour 3', label: 'Hour 3 (10:00 - 11:00)', shortLabel: '3rd Hr' },
+    { key: 'Hour 4', label: 'Hour 4 (11:00 - 12:00)', shortLabel: '4th Hr' },
+    { key: 'Hour 5', label: 'Hour 5 (12:30 - 13:30)', shortLabel: '5th Hr' },
+    { key: 'Hour 6', label: 'Hour 6 (13:30 - 14:30)', shortLabel: '6th Hr' },
+    { key: 'Hour 7', label: 'Hour 7 (14:30 - 15:30)', shortLabel: '7th Hr' },
+    { key: 'Hour 8', label: 'Hour 8 (15:30 - 16:30)', shortLabel: '8th Hr' }
   ];
 
-  // Load existing records from DB on mount
+  // Load database options on mount
   useEffect(() => {
     loadDatabaseOptions();
   }, []);
 
-  // When machine, date or shift changes, load hourly data & tool plans
+  // Recalculate target whenever UPH changes: Target = UPH * 60
+  useEffect(() => {
+    const calc = Math.round(Math.max(0, parseFloat(uphValue) || 0) * 60);
+    setCalculatedTarget(calc);
+  }, [uphValue]);
+
+  // When machine, date or shift changes, reload
   useEffect(() => {
     loadMachineToolPlans(selectedMachine);
     loadHourlyRecords();
@@ -80,14 +92,13 @@ export default function HourlyProductionEntry({
 
   const loadDatabaseOptions = async () => {
     try {
-      const [machRes, empRes] = await Promise.all([
+      const [machRes, empRes, dtRes] = await Promise.all([
         api.getMachines(),
-        api.getEmployees()
+        api.getEmployees(),
+        api.getDowntimeCodes()
       ]);
 
-      const machines = machRes.machines || [];
-      setMachinesList(machines);
-
+      setMachinesList(machRes.machines || []);
       const employees = empRes.employees || [];
       const opList = employees.map(e => ({
         id: e.emp_id,
@@ -98,17 +109,16 @@ export default function HourlyProductionEntry({
       if (opList.length > 0 && !selectedOperator) {
         setSelectedOperator(opList[0].display);
       }
+      if (dtRes && dtRes.codes && dtRes.codes.length > 0) {
+        setDowntimeCodes(dtRes.codes);
+      }
     } catch (err) {
-      console.warn('Failed to load DB dropdown options:', err);
+      console.warn('Failed to load database options:', err);
     }
   };
 
   const loadMachineToolPlans = async (machineNum) => {
     try {
-      const isTandem = machineNum.includes('LP') || machineNum.includes('HP');
-      const defTarget = isTandem ? 125 : 75;
-      setTargetQty(defTarget);
-
       const res = await api.getPlans(machineNum);
       const plans = res.plans || [];
       const tools = plans.map(p => ({
@@ -117,11 +127,9 @@ export default function HourlyProductionEntry({
         display: `${p.tool_number} - ${p.part_name || 'Die'}`
       }));
 
-      // Add common default tools if machine has no specific tool plan yet
       if (tools.length === 0) {
         tools.push(
-          { toolNumber: `TL-${machineNum}-01`, partName: 'Die Standard', display: `TL-${machineNum}-01 (Standard)` },
-          { toolNumber: 'TL-1002-CTR', partName: 'Center Pillar', display: 'TL-1002-CTR (Center Pillar)' },
+          { toolNumber: 'TL-1001-CTR', partName: 'Center Pillar', display: 'TL-1001-CTR (Center Pillar)' },
           { toolNumber: 'TL-2010-DRF', partName: 'Door Frame', display: 'TL-2010-DRF (Door Frame)' }
         );
       }
@@ -129,8 +137,7 @@ export default function HourlyProductionEntry({
       if (tools[0]) setToolNumber(tools[0].toolNumber);
     } catch (e) {
       setToolOptions([
-        { toolNumber: 'TL-1002-CTR', partName: 'Center Pillar', display: 'TL-1002-CTR' },
-        { toolNumber: 'TL-2010-DRF', partName: 'Door Frame', display: 'TL-2010-DRF' }
+        { toolNumber: 'TL-1001-CTR', partName: 'Center Pillar', display: 'TL-1001-CTR' }
       ]);
     }
   };
@@ -146,16 +153,20 @@ export default function HourlyProductionEntry({
       const serverRecords = res.records || [];
       setRecords(serverRecords);
 
-      // If an existing record exists for currently selected hour, prefill form
+      // Prefill if record exists for currently selected hour
       const currentRec = serverRecords.find(r => r.hour_interval && r.hour_interval.includes(selectedHour));
       if (currentRec) {
         if (currentRec.tool_number) setToolNumber(currentRec.tool_number);
         if (currentRec.operator_name) setSelectedOperator(currentRec.operator_name);
-        setTargetQty(currentRec.target_qty || 75);
-        setActualQty(currentRec.actual_qty || 0);
-        setRejectedQty(currentRec.rejected_qty || 0);
-        setDowntimeMinutes(currentRec.downtime_minutes || 0);
-        setDowntimeReason(currentRec.downtime_reason || '');
+        if (currentRec.uph && Number(currentRec.uph) > 0) {
+          setUphValue(Number(currentRec.uph));
+        }
+        setActualQty(Number(currentRec.actual_qty) || 0);
+        setRejectedQty(Number(currentRec.rejected_qty) || 0);
+        setDowntimeMinutes(Number(currentRec.downtime_minutes) || 0);
+        setDowntimeCode(currentRec.downtime_code || 'D01');
+        setDowntimeReason(currentRec.downtime_reason || 'Machine Breakdown');
+        setRemarks(currentRec.remarks || '');
       }
     } catch (err) {
       console.warn('Load hourly error:', err);
@@ -172,27 +183,41 @@ export default function HourlyProductionEntry({
       const isTandem = selectedMachine.includes('LP') || selectedMachine.includes('HP');
       const goodCount = Math.max(0, actualQty - rejectedQty);
 
+      // Target Production = UPH × 60
+      const finalTarget = calculatedTarget;
+      const prodPct = finalTarget > 0 ? Number(((actualQty / finalTarget) * 100).toFixed(1)) : 0;
+      const hourlyPct = prodPct;
+      const entryTimeStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      // Clean operator name
+      const opNameClean = selectedOperator.includes('(') ? selectedOperator.split('(')[0].trim() : selectedOperator;
+
       const payload = {
         production_type: isTandem ? 'Tandem' : 'NC',
         machine_or_line: selectedMachine,
         tool_number: toolNumber,
-        operator_name: selectedOperator,
-        target_qty: parseInt(targetQty, 10) || 0,
+        operator_name: opNameClean,
+        uph: Number(uphValue) || 10,
+        target_qty: finalTarget,
         actual_qty: parseInt(actualQty, 10) || 0,
         good_qty: goodCount,
         rejected_qty: parseInt(rejectedQty, 10) || 0,
+        production_pct: prodPct,
+        hourly_output_pct: hourlyPct,
         downtime_minutes: parseInt(downtimeMinutes, 10) || 0,
+        downtime_code: downtimeCode,
         downtime_reason: downtimeReason,
         remarks: remarks,
+        entry_time: entryTimeStr,
         hour_interval: selectedHour,
         date: activeDate,
         shift: selectedShift
       };
 
       await api.saveHourlyProduction(payload);
-      showNotice('success', `Saved ${selectedMachine} output for ${selectedHour}: ${actualQty} parts (Tool: ${toolNumber})`);
+      showNotice('success', `Saved ${selectedMachine} [${selectedHour}]: UPH=${uphValue}, Target=${finalTarget}, Actual=${actualQty}, Achievement=${prodPct}%`);
       
-      // Auto-advance to next hour for quick sequential shopfloor entry
+      // Auto-advance to next hour
       const currentIdx = hoursList.findIndex(h => h.key === selectedHour);
       if (currentIdx >= 0 && currentIdx < hoursList.length - 1) {
         setSelectedHour(hoursList[currentIdx + 1].key);
@@ -207,48 +232,46 @@ export default function HourlyProductionEntry({
     }
   };
 
-  // Handle clicking an hour row in the table to load its data
   const handleSelectTableRow = (hourKey) => {
     setSelectedHour(hourKey);
     const found = records.find(r => r.hour_interval && r.hour_interval.includes(hourKey));
     if (found) {
       if (found.tool_number) setToolNumber(found.tool_number);
       if (found.operator_name) setSelectedOperator(found.operator_name);
-      setTargetQty(found.target_qty || 75);
-      setActualQty(found.actual_qty || 0);
-      setRejectedQty(found.rejected_qty || 0);
-      setDowntimeMinutes(found.downtime_minutes || 0);
-      setDowntimeReason(found.downtime_reason || '');
+      if (found.uph && Number(found.uph) > 0) setUphValue(Number(found.uph));
+      setActualQty(Number(found.actual_qty) || 0);
+      setRejectedQty(Number(found.rejected_qty) || 0);
+      setDowntimeMinutes(Number(found.downtime_minutes) || 0);
+      setDowntimeCode(found.downtime_code || 'D01');
+      setDowntimeReason(found.downtime_reason || 'Machine Breakdown');
     }
   };
 
   // Aggregates for shift
-  const totalTarget = records.reduce((sum, r) => sum + (r.target_qty || 0), 0);
-  const totalActual = records.reduce((sum, r) => sum + (r.actual_qty || 0), 0);
-  const totalGood = records.reduce((sum, r) => sum + (r.good_qty || 0), 0);
-  const totalScrap = records.reduce((sum, r) => sum + (r.rejected_qty || 0), 0);
-  const totalDowntime = records.reduce((sum, r) => sum + (r.downtime_minutes || 0), 0);
+  const totalTarget = records.reduce((sum, r) => sum + (Number(r.target_qty) || 0), 0);
+  const totalActual = records.reduce((sum, r) => sum + (Number(r.actual_qty) || 0), 0);
+  const totalDowntime = records.reduce((sum, r) => sum + (Number(r.downtime_minutes) || 0), 0);
   const shiftAchieve = totalTarget > 0 ? Math.round((totalActual / totalTarget) * 100) : 0;
 
   return (
-    <div style={{ padding: '16px', background: '#f8fafc', minHeight: '100%' }}>
+    <div style={{ padding: '16px', background: '#f8fafc', minHeight: '100%', color: '#0f172a' }}>
       {/* Toast Notification */}
       {notification && (
         <div style={{
           padding: '12px 18px',
           borderRadius: 8,
           marginBottom: 14,
-          background: notification.type === 'success' ? '#ecfdf5' : '#fef2f2',
-          border: `1px solid ${notification.type === 'success' ? '#a7f3d0' : '#fecaca'}`,
-          color: notification.type === 'success' ? '#065f46' : '#991b1b',
+          background: notification.type === 'success' ? '#f0fdf4' : '#fff7ed',
+          border: `1px solid ${notification.type === 'success' ? '#bbf7d0' : '#fed7aa'}`,
+          color: notification.type === 'success' ? '#15803d' : '#c2410c',
           fontWeight: 700,
           fontSize: '0.85rem',
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          boxShadow: '0 2px 6px rgba(0,0,0,0.06)'
+          boxShadow: '0 2px 6px rgba(0,0,0,0.05)'
         }}>
-          {notification.type === 'success' ? <CheckCircle size={18} /> : <AlertCircle size={18} />}
+          {notification.type === 'success' ? <CheckCircle size={18} color="#16a34a" /> : <AlertCircle size={18} color="#ea580c" />}
           <span>{notification.message}</span>
         </div>
       )}
@@ -266,28 +289,28 @@ export default function HourlyProductionEntry({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ 
-                background: '#fef3c7', 
-                color: '#92400e', 
+                background: '#ea580c', 
+                color: '#ffffff', 
                 padding: '4px 10px', 
                 borderRadius: 6, 
-                fontWeight: 800, 
+                fontWeight: 900, 
                 fontSize: '0.72rem',
-                border: '1px solid #fde68a'
+                letterSpacing: '0.05em'
               }}>
-                PAGE 2 • SHOPFLOOR LOGGING
+                UPH CADENCE
               </span>
-              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#0f172a' }}>
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 900, color: '#0f172a', margin: 0 }}>
                 Hourly Production Entry
               </h2>
             </div>
-            <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: 3 }}>
-              Rapid shopfloor entry with tool tracking, target verification, and 8-hour progress monitoring
+            <p style={{ fontSize: '0.8rem', color: '#64748b', marginTop: 4 }}>
+              Automatic target generation: <strong style={{ color: '#ea580c' }}>Target Production = UPH × 60</strong>. Operator enters actual output.
             </p>
           </div>
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: '0.8rem', color: '#475569', background: '#f1f5f9', padding: '6px 12px', borderRadius: 6, fontWeight: 700 }}>
-              📅 {activeDate} • {selectedShift}
+            <span style={{ fontSize: '0.8rem', color: '#0f172a', background: '#f8fafc', border: '1px solid #e2e8f0', padding: '6px 12px', borderRadius: 6, fontWeight: 700 }}>
+              📅 {activeDate} • <span style={{ color: '#ea580c' }}>{selectedShift}</span>
             </span>
             <button
               onClick={loadHourlyRecords}
@@ -313,7 +336,7 @@ export default function HourlyProductionEntry({
         </div>
       </div>
 
-      {/* CORE FORM: 6 MANDATORY FIELDS (Tool, Machine, Operator, Target, Hour, Actual) */}
+      {/* CORE ENTRY FORM */}
       <div style={{
         background: '#ffffff',
         borderRadius: 12,
@@ -324,11 +347,11 @@ export default function HourlyProductionEntry({
       }}>
         <div style={{ borderBottom: '1px solid #f1f5f9', paddingBottom: 10, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Clock size={18} color="#1e40af" />
-            <span>Production Entry Form</span>
+            <Clock size={18} color="#ea580c" />
+            <span>Hourly Production Entry Form</span>
           </h3>
-          <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
-            Records are stored directly in production_records
+          <span style={{ fontSize: '0.74rem', color: '#16a34a', fontWeight: 800 }}>
+            ✓ Target Calculated Automatically: UPH × 60
           </span>
         </div>
 
@@ -378,34 +401,32 @@ export default function HourlyProductionEntry({
             {/* 2. TOOL NUMBER */}
             <div>
               <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>
-                2. Tool Number *
+                2. Tool / Die Number *
               </label>
-              <div style={{ position: 'relative' }}>
-                <input
-                  type="text"
-                  list="tool-datalist"
-                  value={toolNumber}
-                  onChange={(e) => setToolNumber(e.target.value.toUpperCase())}
-                  placeholder="e.g. TL-1002-CTR"
-                  style={{
-                    width: '100%',
-                    padding: '9px 12px',
-                    borderRadius: 8,
-                    border: '1px solid #cbd5e1',
-                    fontSize: '0.85rem',
-                    fontWeight: 700,
-                    color: '#1e40af',
-                    background: '#f8fafc',
-                    fontFamily: 'monospace'
-                  }}
-                  required
-                />
-                <datalist id="tool-datalist">
-                  {toolOptions.map((t, idx) => (
-                    <option key={idx} value={t.toolNumber}>{t.display}</option>
-                  ))}
-                </datalist>
-              </div>
+              <input
+                type="text"
+                list="tool-options-list"
+                value={toolNumber}
+                onChange={(e) => setToolNumber(e.target.value.toUpperCase())}
+                placeholder="e.g. TL-1001-CTR"
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: 8,
+                  border: '1px solid #cbd5e1',
+                  fontSize: '0.85rem',
+                  fontWeight: 700,
+                  color: '#ea580c',
+                  background: '#fff7ed',
+                  fontFamily: 'monospace'
+                }}
+                required
+              />
+              <datalist id="tool-options-list">
+                {toolOptions.map((t, idx) => (
+                  <option key={idx} value={t.toolNumber}>{t.display}</option>
+                ))}
+              </datalist>
             </div>
 
             {/* 3. OPERATOR SELECTION */}
@@ -459,51 +480,60 @@ export default function HourlyProductionEntry({
               </select>
             </div>
 
-            {/* 5. TARGET PRODUCTION */}
+            {/* 5. UPH INPUT (Units Per Hour) */}
             <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>
-                5. Target Production *
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, color: '#ea580c', marginBottom: 6 }}>
+                5. UPH (Units Per Hour) *
               </label>
               <input
                 type="number"
-                min="0"
-                value={targetQty}
-                onChange={(e) => setTargetQty(parseInt(e.target.value, 10) || 0)}
+                min="0.5"
+                step="0.5"
+                value={uphValue}
+                onChange={(e) => setUphValue(parseFloat(e.target.value) || 0)}
                 style={{
                   width: '100%',
                   padding: '9px 12px',
                   borderRadius: 8,
-                  border: '1px solid #cbd5e1',
+                  border: '2px solid #ea580c',
                   fontSize: '0.9rem',
-                  fontWeight: 800,
-                  color: '#334155'
+                  fontWeight: 900,
+                  color: '#ea580c',
+                  background: '#fff7ed'
                 }}
                 required
               />
+              <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#16a34a', marginTop: 4, display: 'block' }}>
+                Auto Target: {calculatedTarget} pcs ({uphValue} × 60)
+              </span>
             </div>
 
             {/* 6. ACTUAL PRODUCTION */}
             <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, color: '#1e40af', marginBottom: 6 }}>
-                6. Actual Production *
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>
+                6. Actual Production (Pcs) *
               </label>
               <input
                 type="number"
                 min="0"
                 value={actualQty}
                 onChange={(e) => setActualQty(parseInt(e.target.value, 10) || 0)}
+                placeholder="Enter actual parts"
                 style={{
                   width: '100%',
                   padding: '9px 12px',
                   borderRadius: 8,
-                  border: '2px solid #2563eb',
+                  border: '2px solid #16a34a',
                   fontSize: '1rem',
                   fontWeight: 900,
-                  color: '#1e40af',
-                  background: '#eff6ff'
+                  color: '#16a34a',
+                  background: '#f0fdf4'
                 }}
                 required
               />
+              <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#475569', marginTop: 4, display: 'block' }}>
+                Achievement: {calculatedTarget > 0 ? Math.round((actualQty / calculatedTarget) * 100) : 0}%
+              </span>
             </div>
           </div>
 
@@ -529,9 +559,9 @@ export default function HourlyProductionEntry({
                       fontSize: '0.75rem',
                       fontWeight: 700,
                       cursor: 'pointer',
-                      border: isSelected ? '2px solid #1e40af' : '1px solid #e2e8f0',
-                      background: isSelected ? '#eff6ff' : hasActual ? '#f0fdf4' : '#ffffff',
-                      color: isSelected ? '#1e40af' : hasActual ? '#166534' : '#64748b'
+                      border: isSelected ? '2px solid #ea580c' : '1px solid #e2e8f0',
+                      background: isSelected ? '#fff7ed' : hasActual ? '#f0fdf4' : '#ffffff',
+                      color: isSelected ? '#ea580c' : hasActual ? '#15803d' : '#64748b'
                     }}
                   >
                     {h.shortLabel} {hasActual && `(${existing.actual_qty})`}
@@ -544,7 +574,7 @@ export default function HourlyProductionEntry({
           {/* Quality & Downtime Secondary Row */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
             gap: 12,
             background: '#f8fafc',
             padding: '12px 14px',
@@ -554,10 +584,10 @@ export default function HourlyProductionEntry({
           }}>
             <div>
               <label style={{ fontSize: '0.7rem', fontWeight: 700, color: '#16a34a', display: 'block', marginBottom: 4 }}>
-                Good Parts
+                Good Parts Output
               </label>
-              <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#166534', padding: '6px 0' }}>
-                {Math.max(0, actualQty - rejectedQty)}
+              <div style={{ fontSize: '0.95rem', fontWeight: 900, color: '#15803d', padding: '6px 0' }}>
+                {Math.max(0, actualQty - rejectedQty)} pcs
               </div>
             </div>
 
@@ -575,7 +605,7 @@ export default function HourlyProductionEntry({
             </div>
 
             <div>
-              <label style={{ fontSize: '0.7rem', fontWeight: 700, color: '#b45309', display: 'block', marginBottom: 4 }}>
+              <label style={{ fontSize: '0.7rem', fontWeight: 700, color: '#ea580c', display: 'block', marginBottom: 4 }}>
                 Downtime (Minutes)
               </label>
               <input
@@ -588,53 +618,66 @@ export default function HourlyProductionEntry({
             </div>
 
             <div>
+              <label style={{ fontSize: '0.7rem', fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
+                Downtime Code (6 Codes)
+              </label>
+              <select
+                value={downtimeCode}
+                onChange={(e) => {
+                  setDowntimeCode(e.target.value);
+                  const matched = downtimeCodes.find(c => c.code === e.target.value);
+                  if (matched) setDowntimeReason(matched.name);
+                }}
+                style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem', background: '#fff' }}
+              >
+                {downtimeCodes.map(c => (
+                  <option key={c.code} value={c.code}>{c.code} – {c.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
               <label style={{ fontSize: '0.7rem', fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>
-                Downtime Reason
+                Remarks / Observation
               </label>
               <input
                 type="text"
-                placeholder="Die change, inspection, etc."
-                value={downtimeReason}
-                onChange={(e) => setDowntimeReason(e.target.value)}
+                placeholder="Optional notes"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
                 style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
               />
             </div>
           </div>
 
-          {/* Submit Action Bar */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-            <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-              Hourly Variance: <strong style={{ color: actualQty >= targetQty ? '#16a34a' : '#dc2626' }}>
-                {actualQty - targetQty >= 0 ? `+${actualQty - targetQty} Surplus` : `${actualQty - targetQty} Deficit`}
-              </strong>
-            </div>
-
+          {/* Action Row */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
             <button
               type="submit"
               disabled={saving}
               style={{
+                background: '#ea580c',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: 8,
+                padding: '10px 24px',
+                fontSize: '0.85rem',
+                fontWeight: 800,
+                cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                padding: '10px 24px',
-                borderRadius: 8,
-                background: '#1e40af',
-                color: '#ffffff',
-                border: 'none',
-                fontSize: '0.88rem',
-                fontWeight: 800,
-                cursor: 'pointer',
-                boxShadow: '0 2px 6px rgba(30,64,175,0.25)'
+                boxShadow: '0 2px 6px rgba(234, 88, 12, 0.25)'
               }}
             >
               <Save size={16} />
-              <span>{saving ? 'Recording Output...' : `Save ${selectedHour} Output`}</span>
+              <span>{saving ? 'Saving...' : `Save ${selectedHour} Output`}</span>
             </button>
           </div>
         </form>
       </div>
 
-      {/* 8-HOUR PRODUCTION MATRIX TABLE FOR THIS MACHINE */}
+      {/* 8-HOUR MONITORING MATRIX */}
       <div style={{
         background: '#ffffff',
         borderRadius: 12,
@@ -642,115 +685,91 @@ export default function HourlyProductionEntry({
         border: '1px solid #e2e8f0',
         boxShadow: '0 1px 3px rgba(0,0,0,0.04)'
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h3 style={{ fontSize: '0.95rem', fontWeight: 800, color: '#0f172a' }}>
-            8-Hour Shift Summary — {selectedMachine}
+            Shift Production Matrix ({selectedMachine} • {selectedShift})
           </h3>
-          <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-            Click any row to load into form
-          </span>
+          <div style={{ display: 'flex', gap: 14, fontSize: '0.8rem' }}>
+            <span>Target: <strong style={{ color: '#ea580c' }}>{totalTarget}</strong></span>
+            <span>Actual: <strong style={{ color: '#16a34a' }}>{totalActual}</strong></span>
+            <span>Achievement: <strong style={{ color: shiftAchieve >= 85 ? '#16a34a' : '#ea580c' }}>{shiftAchieve}%</strong></span>
+            <span>Downtime: <strong>{totalDowntime}m</strong></span>
+          </div>
         </div>
 
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
             <thead>
-              <tr style={{ background: '#f1f5f9', borderBottom: '2px solid #cbd5e1' }}>
-                <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 800, color: '#334155' }}>Hour</th>
-                <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 800, color: '#334155' }}>Tool Number</th>
-                <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 800, color: '#334155' }}>Operator</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#334155' }}>Target</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#1e40af' }}>Actual</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#16a34a' }}>Good</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#dc2626' }}>Scrap</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#b45309' }}>Downtime</th>
-                <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#334155' }}>Status %</th>
+              <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', textAlign: 'left', color: '#475569' }}>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Hour Interval</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Tool Number</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Operator</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800, color: '#ea580c' }}>UPH</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Target (UPH×60)</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Actual Output</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Production %</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Hourly Output %</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Downtime</th>
+                <th style={{ padding: '10px 12px', fontWeight: 800 }}>Entry Time</th>
               </tr>
             </thead>
             <tbody>
-              {hoursList.map((h) => {
+              {hoursList.map(h => {
                 const rec = records.find(r => r.hour_interval && r.hour_interval.includes(h.key));
-                const target = rec ? rec.target_qty : (selectedMachine.includes('LP') || selectedMachine.includes('HP') ? 125 : 75);
-                const actual = rec ? rec.actual_qty : 0;
-                const good = rec ? rec.good_qty : 0;
-                const scrap = rec ? rec.rejected_qty : 0;
-                const dt = rec ? rec.downtime_minutes : 0;
-                const op = rec ? (rec.operator_name || '—') : '—';
-                const tool = rec ? (rec.tool_number || '—') : '—';
-                const pct = target > 0 ? Math.round((actual / target) * 100) : 0;
-                const isSelected = selectedHour === h.key;
+                const tgt = rec ? (Number(rec.target_qty) || 0) : 0;
+                const act = rec ? (Number(rec.actual_qty) || 0) : 0;
+                const pct = tgt > 0 ? Math.round((act / tgt) * 100) : 0;
 
                 return (
-                  <tr
-                    key={h.key}
-                    onClick={() => handleSelectTableRow(h.key)}
-                    style={{
-                      borderBottom: '1px solid #f1f5f9',
-                      cursor: 'pointer',
-                      background: isSelected ? '#eff6ff' : 'transparent'
-                    }}
-                  >
-                    <td style={{ padding: '8px 10px', fontWeight: 700, color: isSelected ? '#1e40af' : '#0f172a' }}>
-                      {h.shortLabel}
+                  <tr key={h.key} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                    <td style={{ padding: '10px 12px', fontWeight: 700, color: '#0f172a' }}>{h.label}</td>
+                    <td style={{ padding: '10px 12px', fontFamily: 'monospace' }}>{rec?.tool_number || '—'}</td>
+                    <td style={{ padding: '10px 12px' }}>{rec?.operator_name || '—'}</td>
+                    <td style={{ padding: '10px 12px', fontWeight: 800, color: '#ea580c' }}>{rec?.uph || '—'}</td>
+                    <td style={{ padding: '10px 12px', fontWeight: 800 }}>{tgt > 0 ? `${tgt} pcs` : '—'}</td>
+                    <td style={{ padding: '10px 12px', fontWeight: 900, color: act > 0 ? '#16a34a' : '#94a3b8' }}>
+                      {act > 0 ? `${act} pcs` : '—'}
                     </td>
-                    <td style={{ padding: '8px 10px', fontFamily: 'monospace', color: '#1e40af', fontWeight: 600 }}>
-                      {tool}
+                    <td style={{ padding: '10px 12px' }}>
+                      {tgt > 0 ? (
+                        <span style={{
+                          padding: '3px 8px',
+                          borderRadius: 6,
+                          fontWeight: 800,
+                          fontSize: '0.74rem',
+                          background: pct >= 85 ? '#dcfce7' : '#ffedd5',
+                          color: pct >= 85 ? '#15803d' : '#ea580c'
+                        }}>
+                          {pct}%
+                        </span>
+                      ) : '—'}
                     </td>
-                    <td style={{ padding: '8px 10px', color: '#475569' }}>
-                      {op}
+                    <td style={{ padding: '10px 12px' }}>
+                      {tgt > 0 ? (
+                        <span style={{
+                          padding: '3px 8px',
+                          borderRadius: 6,
+                          fontWeight: 800,
+                          fontSize: '0.74rem',
+                          background: pct >= 85 ? '#dcfce7' : '#ffedd5',
+                          color: pct >= 85 ? '#15803d' : '#ea580c'
+                        }}>
+                          {pct}%
+                        </span>
+                      ) : '—'}
                     </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: '#64748b' }}>
-                      {target}
+                    <td style={{ padding: '10px 12px' }}>
+                      {rec && rec.downtime_minutes > 0 ? (
+                        <span style={{ color: '#ea580c', fontWeight: 700 }}>{rec.downtime_minutes}m ({rec.downtime_reason || 'Stop'})</span>
+                      ) : '0m'}
                     </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 800, color: '#1e40af' }}>
-                      {actual}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: '#16a34a', fontWeight: 700 }}>
-                      {good}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: scrap > 0 ? '#dc2626' : '#94a3b8' }}>
-                      {scrap}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: dt > 0 ? '#b45309' : '#94a3b8' }}>
-                      {dt > 0 ? `${dt}m` : '0'}
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                      <span style={{
-                        padding: '2px 6px',
-                        borderRadius: 4,
-                        fontSize: '0.72rem',
-                        fontWeight: 800,
-                        background: pct >= 95 ? '#dcfce7' : pct >= 80 ? '#fef3c7' : '#fee2e2',
-                        color: pct >= 95 ? '#15803d' : pct >= 80 ? '#b45309' : '#b91c1c'
-                      }}>
-                        {pct}%
-                      </span>
+                    <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontSize: '0.75rem', color: '#64748b' }}>
+                      {rec?.entry_time || '—'}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
-            <tfoot>
-              <tr style={{ background: '#f8fafc', fontWeight: 800, borderTop: '2px solid #cbd5e1' }}>
-                <td colSpan={3} style={{ padding: '10px', color: '#0f172a' }}>Shift Total Aggregate:</td>
-                <td style={{ padding: '10px', textAlign: 'right', color: '#64748b' }}>{totalTarget}</td>
-                <td style={{ padding: '10px', textAlign: 'right', color: '#1e40af', fontSize: '0.9rem' }}>{totalActual}</td>
-                <td style={{ padding: '10px', textAlign: 'right', color: '#16a34a' }}>{totalGood}</td>
-                <td style={{ padding: '10px', textAlign: 'right', color: totalScrap > 0 ? '#dc2626' : '#64748b' }}>{totalScrap}</td>
-                <td style={{ padding: '10px', textAlign: 'right', color: '#b45309' }}>{totalDowntime}m</td>
-                <td style={{ padding: '10px', textAlign: 'right' }}>
-                  <span style={{
-                    padding: '3px 8px',
-                    borderRadius: 4,
-                    fontSize: '0.78rem',
-                    fontWeight: 800,
-                    background: shiftAchieve >= 95 ? '#16a34a' : shiftAchieve >= 80 ? '#f59e0b' : '#ef4444',
-                    color: '#ffffff'
-                  }}>
-                    {shiftAchieve}%
-                  </span>
-                </td>
-              </tr>
-            </tfoot>
           </table>
         </div>
       </div>

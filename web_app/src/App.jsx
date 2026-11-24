@@ -28,6 +28,7 @@ import ProductionWorkspacePage from './pages/ProductionWorkspacePage';
 import ProductionDashboardPage from './pages/ProductionDashboardPage';
 import ProductionAnalyticsPage from './pages/ProductionAnalyticsPage';
 import ActivityLogPage from './pages/ActivityLogPage';
+import MachineSummaryPage from './pages/MachineSummaryPage';
 
 import { api, getServerUrl } from './api';
 import { isSupabaseConfigured } from './supabase';
@@ -35,6 +36,7 @@ import { isSupabaseConfigured } from './supabase';
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // Default to the Home screen matching image
   const [selectedMachineForHourly, setSelectedMachineForHourly] = useState({ machine: 'NC-01', type: 'NC' });
+  const [selectedMachineForSummary, setSelectedMachineForSummary] = useState('NC-01');
   const [sidebarOpen, setSidebarOpen] = useState(false); // Left Sidebar Drawer state
 
   // Plant Date and Shift State
@@ -116,9 +118,15 @@ export default function App() {
     setActiveTab('hourly-production');
   };
 
+  const handleSelectMachineSummary = (machineNumber) => {
+    if (machineNumber) setSelectedMachineForSummary(machineNumber);
+    setActiveTab('machine-summary');
+  };
+
   const getPageTitle = () => {
     switch (activeTab) {
       case 'cell-status': return 'Live Cell Status & Output %';
+      case 'machine-summary': return 'Machine Summary & Asset Intelligence';
       case 'production-hub': return 'Production Hub & Hourly Output';
       case 'plans': return 'Machine Tool Plans (Max 5 Plans)';
       case 'dashboard': return 'Plant Executive Dashboard';
@@ -227,6 +235,7 @@ export default function App() {
               selectedDate={selectedDate} 
               selectedShift={selectedShift}
               onLogHourlyForMachine={handleLogHourlyForMachine}
+              onSelectMachineSummary={handleSelectMachineSummary}
             />
           )}
 
@@ -368,6 +377,20 @@ export default function App() {
           {activeTab === 'activity-logs' && (
             <ActivityLogPage
               key={`actlog-${syncKey}`}
+            />
+          )}
+
+          {/* 18. Dedicated Machine Summary Page (Phase 2 Upgrade) */}
+          {activeTab === 'machine-summary' && (
+            <MachineSummaryPage
+              key={`machsum-${syncKey}-${selectedMachineForSummary}`}
+              selectedDate={selectedDate}
+              selectedShift={selectedShift}
+              initialMachine={selectedMachineForSummary}
+              onNavigateHourly={(m) => {
+                setSelectedMachineForHourly({ machine: m, type: m.startsWith('NC') ? 'NC' : 'Tandem' });
+                setActiveTab('hourly-production');
+              }}
             />
           )}
         </main>

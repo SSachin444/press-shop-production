@@ -200,16 +200,19 @@ def init_db():
     )
     """)
 
-    # Ensure tool_number & supervisor_name columns exist in production_records
-    try:
-        cursor.execute("ALTER TABLE production_records ADD COLUMN tool_number TEXT DEFAULT ''")
-    except Exception:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE production_records ADD COLUMN supervisor_name TEXT DEFAULT ''")
-    except Exception:
-        pass
+    # Ensure tool_number, supervisor_name, uph, production_pct, hourly_output_pct, entry_time columns exist in production_records
+    for col_def in [
+        ("tool_number", "TEXT DEFAULT ''"),
+        ("supervisor_name", "TEXT DEFAULT ''"),
+        ("uph", "REAL DEFAULT 0"),
+        ("production_pct", "REAL DEFAULT 0"),
+        ("hourly_output_pct", "REAL DEFAULT 0"),
+        ("entry_time", "TEXT DEFAULT ''")
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE production_records ADD COLUMN {col_def[0]} {col_def[1]}")
+        except Exception:
+            pass
 
     # 11. Activity Logs for Audit History
     cursor.execute("""
@@ -229,16 +232,60 @@ def init_db():
     CREATE TABLE IF NOT EXISTS machine_downtime (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         machine_number TEXT NOT NULL,
+        downtime_code TEXT DEFAULT 'D01',
         breakdown_start TEXT NOT NULL,
         breakdown_end TEXT,
         breakdown_reason TEXT NOT NULL,
         total_downtime_minutes INTEGER DEFAULT 0,
         remarks TEXT,
         reported_by TEXT,
+        operator_name TEXT DEFAULT '',
+        date TEXT DEFAULT '',
+        shift TEXT DEFAULT 'Shift A',
         status TEXT DEFAULT 'Open' CHECK(status IN ('Open', 'Resolved', 'Under Repair')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    for col_def in [
+        ("downtime_code", "TEXT DEFAULT 'D01'"),
+        ("operator_name", "TEXT DEFAULT ''"),
+        ("date", "TEXT DEFAULT ''"),
+        ("shift", "TEXT DEFAULT 'Shift A'")
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE machine_downtime ADD COLUMN {col_def[0]} {col_def[1]}")
+        except Exception:
+            pass
+
+    # 13. Configurable Downtime Codes (Maximum 6 Codes)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS downtime_codes (
+        code TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        display_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Seed the 6 Configured Downtime Codes
+    default_downtime_codes = [
+        ('D01', 'Machine Breakdown', 'Mechanical or electrical failure', 1),
+        ('D02', 'Tool Problem', 'Tool wear, breakage, or die alignment', 2),
+        ('D03', 'Material Shortage', 'Raw material, blank, or coil unavailability', 3),
+        ('D04', 'Power Failure', 'Electrical grid, power outage, or generator fault', 4),
+        ('D05', 'Quality Problem', 'Defects, burr, crack, or dimensional issues', 5),
+        ('D06', 'Other Issues', 'Maintenance, safety, air pressure, or miscellaneous', 6)
+    ]
+    for code, name, desc, order_num in default_downtime_codes:
+        cursor.execute("""
+        INSERT INTO downtime_codes (code, name, description, display_order)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(code) DO NOTHING
+        """, (code, name, desc, order_num))
 
     conn.commit()
 
