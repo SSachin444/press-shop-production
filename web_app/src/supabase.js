@@ -13,8 +13,16 @@ export function getSupabaseConfig() {
   const storedUrl = typeof window !== 'undefined' ? localStorage.getItem('pha_supabase_url') : '';
   const storedKey = typeof window !== 'undefined' ? localStorage.getItem('pha_supabase_key') : '';
 
-  const url = (storedUrl && storedUrl.trim()) || ENV_URL.trim();
-  const anonKey = (storedKey && storedKey.trim()) || ENV_KEY.trim();
+  let url = (storedUrl && storedUrl.trim()) || ENV_URL.trim();
+  let anonKey = (storedKey && storedKey.trim()) || ENV_KEY.trim();
+
+  // Self-healing guard: If URL was mistakenly set to vyvrzrururndbfmfmhqp with oyjefyeueetxboifukyr's publishable key
+  if (url.includes('vyvrzrururndbfmfmhqp') && anonKey.startsWith('sb_publishable_yd1zp9Wcufa')) {
+    url = 'https://oyjefyeueetxboifukyr.supabase.co';
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('pha_supabase_url', url);
+    }
+  }
 
   return { url, anonKey };
 }
@@ -302,6 +310,22 @@ export async function supabaseSaveProductionRecord(record) {
   return data?.[0] || row;
 }
 
+export async function supabaseDeleteProductionRecord(recordId) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  const { error } = await client.from('production_records').delete().eq('id', recordId);
+  if (error) throw error;
+  return true;
+}
+
+export async function supabaseUpdateProductionRecord(recordId, updateData) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  const { error } = await client.from('production_records').update(updateData).eq('id', recordId);
+  if (error) throw error;
+  return true;
+}
+
 // DOWNTIME CODES & MANAGEMENT
 export async function supabaseGetDowntimeCodes() {
   const client = getSupabaseClient();
@@ -479,5 +503,128 @@ export async function supabaseLogActivity(user_name, action, record_type, detail
     return true;
   } catch (e) {
     return false;
+  }
+}
+
+export async function supabaseDeleteMachine(machineNumber) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  const { error } = await client.from('machines').delete().eq('machine_number', machineNumber);
+  if (error) throw error;
+  return true;
+}
+
+export async function supabaseDeletePlan(planId) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  const { error } = await client.from('machine_plans').delete().eq('id', planId);
+  if (error) throw error;
+  return true;
+}
+
+export async function supabaseUpdatePlan(planId, data) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  const { error } = await client.from('machine_plans').update(data).eq('id', planId);
+  if (error) throw error;
+  return true;
+}
+
+// APPLICATION SETTINGS
+export async function supabaseGetSettings() {
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const { data, error } = await client.from('app_settings').select('*');
+    if (error) return null;
+    const settings = {};
+    (data || []).forEach(row => {
+      try {
+        settings[row.key] = JSON.parse(row.value);
+      } catch (e) {
+        settings[row.key] = row.value;
+      }
+    });
+    return settings;
+  } catch (err) {
+    return null;
+  }
+}
+
+export async function supabaseSaveSettings(key, value) {
+  const client = getSupabaseClient();
+  if (!client) return false;
+  try {
+    const stringVal = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const { error } = await client.from('app_settings').upsert({
+      key,
+      value: stringVal
+    }, { onConflict: 'key' });
+    if (error) throw error;
+    return true;
+  } catch (err) {
+    console.warn('supabaseSaveSettings error:', err.message);
+    return false;
+  }
+}
+
+// REALTIME MULTI-DEVICE BROADCAST LISTENER
+export function subscribeToCloudChanges(callback) {
+  const client = getSupabaseClient();
+  if (!client) return () => {};
+
+  try {
+    const channel = client
+      .channel('pha_realtime_sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'production_records' },
+        (p) => callback && callback('production_records', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        (p) => callback && callback('attendance', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'employees' },
+        (p) => callback && callback('employees', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'machines' },
+        (p) => callback && callback('machines', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'machine_downtime' },
+        (p) => callback && callback('machine_downtime', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'machine_plans' },
+        (p) => callback && callback('machine_plans', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'shift_handovers' },
+        (p) => callback && callback('shift_handovers', p)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'app_state' },
+        (p) => callback && callback('app_state', p)
+      )
+      .subscribe();
+
+    return () => {
+      try {
+        client.removeChannel(channel);
+      } catch (e) {}
+    };
+  } catch (err) {
+    console.warn('Realtime subscription notice:', err);
+    return () => {};
   }
 }

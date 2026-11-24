@@ -11,19 +11,26 @@ import {
   supabaseSaveAttendance,
   supabaseGetMachines,
   supabaseSaveMachine,
+  supabaseDeleteMachine,
   supabaseGetProductionRecords,
   supabaseSaveProductionRecord,
+  supabaseUpdateProductionRecord,
+  supabaseDeleteProductionRecord,
   supabaseGetHandovers,
   supabaseSaveHandover,
   supabaseGetPlans,
   supabaseSavePlan,
+  supabaseUpdatePlan,
+  supabaseDeletePlan,
   supabaseGetActivityLogs,
   supabaseLogActivity,
   supabaseGetDowntimeCodes,
   supabaseSaveDowntimeCode,
   supabaseGetMachineDowntime,
   supabaseSaveMachineDowntime,
-  supabaseResolveMachineDowntime
+  supabaseResolveMachineDowntime,
+  supabaseGetSettings,
+  supabaseSaveSettings
 } from './supabase';
 
 export const DEFAULT_DOWNTIME_CODES = [
@@ -245,6 +252,96 @@ function triggerCloudSync() {
   }
 }
 
+// In-flight sync deduplication & cache tracker
+let cloudSyncPromise = null;
+let lastSyncTime = 0;
+
+export async function syncStoreFromCloud(options = {}) {
+  if (!isSupabaseConfigured()) {
+    return getLocalStore();
+  }
+
+  const now = Date.now();
+  if (!options.force && now - lastSyncTime < 250 && cloudSyncPromise) {
+    return cloudSyncPromise;
+  }
+
+  lastSyncTime = now;
+
+  cloudSyncPromise = (async () => {
+    const store = getLocalStore();
+    try {
+      const [
+        cloudRecs,
+        cloudEmps,
+        cloudAtt,
+        cloudMach,
+        cloudDt,
+        cloudPlans,
+        cloudHandovers,
+        cloudCodes
+      ] = await Promise.all([
+        supabaseGetProductionRecords(options.recordsParams || {}).catch(() => null),
+        supabaseGetEmployees().catch(() => null),
+        supabaseGetAttendance(options.date, options.shift).catch(() => null),
+        supabaseGetMachines().catch(() => null),
+        supabaseGetMachineDowntime().catch(() => null),
+        supabaseGetPlans().catch(() => null),
+        supabaseGetHandovers().catch(() => null),
+        supabaseGetDowntimeCodes().catch(() => null)
+      ]);
+
+      if (Array.isArray(cloudRecs)) {
+        store.production_records = cloudRecs;
+      }
+
+      if (Array.isArray(cloudEmps)) {
+        store.employees = cloudEmps.filter(e => !FAKE_EMPLOYEE_NAMES.includes(e?.name));
+      }
+
+      if (Array.isArray(cloudAtt)) {
+        const existing = store.attendance || [];
+        const cloudMap = new Map();
+        cloudAtt.forEach(a => cloudMap.set(`${a.emp_id}_${a.date}_${a.shift}`, a));
+        const merged = existing.map(e => cloudMap.get(`${e.emp_id}_${e.date}_${e.shift}`) || e);
+        cloudAtt.forEach(a => {
+          if (!existing.some(e => e.emp_id === a.emp_id && e.date === a.date && e.shift === a.shift)) {
+            merged.push(a);
+          }
+        });
+        store.attendance = merged;
+      }
+
+      if (Array.isArray(cloudMach) && cloudMach.length > 0) {
+        store.machines = cloudMach;
+      }
+
+      if (Array.isArray(cloudDt)) {
+        store.machine_downtime = cloudDt;
+      }
+
+      if (Array.isArray(cloudPlans)) {
+        store.machine_plans = cloudPlans;
+      }
+
+      if (Array.isArray(cloudHandovers)) {
+        store.shift_handovers = cloudHandovers;
+      }
+
+      if (Array.isArray(cloudCodes) && cloudCodes.length > 0) {
+        store.downtime_codes = cloudCodes;
+      }
+
+      saveLocalStore(store);
+    } catch (err) {
+      console.warn('Supabase syncStoreFromCloud notice:', err);
+    }
+    return store;
+  })();
+
+  return cloudSyncPromise;
+}
+
 // Generic HTTP request helper (uses Flask if configured, otherwise falls back gracefully)
 async function request(endpoint, options = {}) {
   const base = getApiBase();
@@ -289,11 +386,8 @@ export const api = {
 
     if (isSupabaseConfigured()) {
       try {
-        const cloudState = await supabaseGetAppState();
-        if (cloudState && Object.keys(cloudState).length > 0) {
-          saveLocalStore(cloudState);
-          return cloudState;
-        }
+        const synced = await syncStoreFromCloud({ force: true });
+        return synced;
       } catch (err) {}
     }
 
@@ -363,7 +457,7 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/dashboard/kpis?${params.toString()}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ date, shift });
       const targetDate = date || new Date().toISOString().split('T')[0];
       const targetShift = shift || 'Shift A';
 
@@ -560,7 +654,7 @@ export const api = {
     } catch (e) {}
 
     // Verified Local & Cloud Calculation Layer
-    const store = getLocalStore();
+    const store = await syncStoreFromCloud({ date, shift });
     const targetDate = date || new Date().toISOString().split('T')[0];
     const targetShift = shift || 'Shift A';
 
@@ -672,7 +766,7 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/production/nc?${params.toString()}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ date, shift });
       const targetDate = date || new Date().toISOString().split('T')[0];
       const targetShift = shift || 'Shift A';
 
@@ -743,7 +837,7 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/production/tandem?${params.toString()}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ date, shift });
       const targetDate = date || new Date().toISOString().split('T')[0];
       const targetShift = shift || 'Shift A';
 
@@ -832,17 +926,24 @@ export const api = {
     const store = getLocalStore();
     const newEmp = {
       ...empData,
-      id: Date.now(),
+      id: empData.id || Date.now(),
       status: empData.status || 'Active',
       created_at: new Date().toISOString()
     };
-    store.employees = [...(store.employees || []), newEmp];
-    saveLocalStore(store);
-    triggerCloudSync();
 
     if (isSupabaseConfigured()) {
-      supabaseSaveEmployee(newEmp).catch(console.warn);
+      try {
+        const saved = await supabaseSaveEmployee(newEmp);
+        if (saved && saved.id) newEmp.id = saved.id;
+      } catch (err) {
+        console.error('Supabase employee save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
     }
+
+    store.employees = [...(store.employees || []).filter(e => e.emp_id !== newEmp.emp_id), newEmp];
+    saveLocalStore(store);
+    triggerCloudSync();
 
     try {
       return await request('/employees', { method: 'POST', body: JSON.stringify(empData) });
@@ -852,16 +953,19 @@ export const api = {
   },
 
   updateEmployee: async (empId, empData) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseSaveEmployee({ emp_id: empId, ...empData });
+      } catch (err) {
+        console.error('Supabase employee update failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.employees = (store.employees || []).map((e) =>
       e.emp_id === empId ? { ...e, ...empData, updated_at: new Date().toISOString() } : e
     );
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveEmployee({ emp_id: empId, ...empData }).catch(console.warn);
-    }
 
     try {
       return await request(`/employees/${empId}`, { method: 'PUT', body: JSON.stringify(empData) });
@@ -871,14 +975,17 @@ export const api = {
   },
 
   deleteEmployee: async (empId) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseDeleteEmployee(empId);
+      } catch (err) {
+        console.error('Supabase employee delete failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.employees = (store.employees || []).filter((e) => e.emp_id !== empId);
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseDeleteEmployee(empId).catch(console.warn);
-    }
 
     try {
       return await request(`/employees/${empId}`, { method: 'DELETE' });
@@ -906,7 +1013,7 @@ export const api = {
       const res = await request(`/attendance${q ? '?' + q : ''}`);
       return res;
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud(params);
       let records = store.attendance || [];
       if (params.date) records = records.filter((r) => r.date === params.date);
       if (params.shift) records = records.filter((r) => r.shift === params.shift);
@@ -937,6 +1044,15 @@ export const api = {
     const store = getLocalStore();
     const newRecords = Array.isArray(data.records) ? data.records : [data];
 
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseSaveAttendance(newRecords);
+      } catch (err) {
+        console.error('Supabase attendance save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
+    }
+
     const existing = store.attendance || [];
     newRecords.forEach((nr) => {
       const idx = existing.findIndex(
@@ -949,10 +1065,6 @@ export const api = {
     store.attendance = existing;
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveAttendance(newRecords).catch(console.warn);
-    }
 
     try {
       return await request('/attendance', { method: 'POST', body: JSON.stringify(data) });
@@ -981,14 +1093,18 @@ export const api = {
   },
 
   createMachine: async (machineData) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseSaveMachine(machineData);
+      } catch (err) {
+        console.error('Supabase machine save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
+    }
     const store = getLocalStore();
-    store.machines = [...(store.machines || DEFAULT_MACHINES), machineData];
+    store.machines = [...(store.machines || DEFAULT_MACHINES).filter(m => m.machine_number !== machineData.machine_number), machineData];
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveMachine(machineData).catch(console.warn);
-    }
 
     try {
       return await request('/machines', { method: 'POST', body: JSON.stringify(machineData) });
@@ -998,16 +1114,19 @@ export const api = {
   },
 
   updateMachine: async (machineNumber, machineData) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseSaveMachine({ machine_number: machineNumber, ...machineData });
+      } catch (err) {
+        console.error('Supabase machine update failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.machines = (store.machines || DEFAULT_MACHINES).map((m) =>
       m.machine_number === machineNumber ? { ...m, ...machineData } : m
     );
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveMachine({ machine_number: machineNumber, ...machineData }).catch(console.warn);
-    }
 
     try {
       return await request(`/machines/${machineNumber}`, { method: 'PUT', body: JSON.stringify(machineData) });
@@ -1017,6 +1136,13 @@ export const api = {
   },
 
   deleteMachine: async (machineNumber) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseDeleteMachine(machineNumber);
+      } catch (err) {
+        console.error('Supabase machine delete failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.machines = (store.machines || DEFAULT_MACHINES).filter((m) => m.machine_number !== machineNumber);
     saveLocalStore(store);
@@ -1163,7 +1289,13 @@ export const api = {
     triggerCloudSync();
 
     if (isSupabaseConfigured()) {
-      supabaseSaveMachineDowntime(newDt).catch(console.warn);
+      try {
+        const saved = await supabaseSaveMachineDowntime(newDt);
+        if (saved && saved.id) newDt.id = saved.id;
+      } catch (err) {
+        console.error('Supabase downtime save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
     }
 
     try {
@@ -1220,7 +1352,11 @@ export const api = {
     triggerCloudSync();
 
     if (isSupabaseConfigured()) {
-      supabaseResolveMachineDowntime(id, data).catch(console.warn);
+      try {
+        await supabaseResolveMachineDowntime(id, data);
+      } catch (err) {
+        console.error('Supabase resolve downtime failed:', err);
+      }
     }
 
     try {
@@ -1238,11 +1374,7 @@ export const api = {
       const q = new URLSearchParams(params).toString();
       return await request(`/production/records${q ? '?' + q : ''}`);
     } catch (e) {
-      if (isSupabaseConfigured()) {
-        const cloud = await supabaseGetProductionRecords(params);
-        if (cloud) return { records: cloud, total: cloud.length };
-      }
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ recordsParams: params });
       let records = store.production_records || [];
       if (params.date) records = records.filter((r) => r.date === params.date);
       if (params.shift) records = records.filter((r) => r.shift === params.shift);
@@ -1315,7 +1447,13 @@ export const api = {
     triggerCloudSync();
 
     if (isSupabaseConfigured()) {
-      supabaseSaveProductionRecord(rec).catch(console.warn);
+      try {
+        const saved = await supabaseSaveProductionRecord(rec);
+        if (saved && saved.id) rec.id = saved.id;
+      } catch (err) {
+        console.error('Supabase production record save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
     }
 
     try {
@@ -1326,6 +1464,13 @@ export const api = {
   },
 
   updateProductionRecord: async (recordId, prodData) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseUpdateProductionRecord(recordId, prodData);
+      } catch (err) {
+        console.error('Failed to update in Supabase:', err);
+      }
+    }
     const store = getLocalStore();
     store.production_records = (store.production_records || []).map((r) =>
       r.id === recordId ? { ...r, ...prodData } : r
@@ -1341,6 +1486,13 @@ export const api = {
   },
 
   deleteProductionRecord: async (recordId) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseDeleteProductionRecord(recordId);
+      } catch (err) {
+        console.error('Failed to delete from Supabase:', err);
+      }
+    }
     const store = getLocalStore();
     store.production_records = (store.production_records || []).filter((r) => r.id !== recordId);
     saveLocalStore(store);
@@ -1358,7 +1510,7 @@ export const api = {
       const q = new URLSearchParams(params).toString();
       return await request(`/production/hourly${q ? '?' + q : ''}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ recordsParams: params });
       const records = (store.production_records || []).filter(
         (r) =>
           (!params.date || r.date === params.date) &&
@@ -1377,7 +1529,7 @@ export const api = {
   // AUTOMATIC OVERALL PRODUCTION (Calculated strictly from hourly records)
   // ==========================================================================
   getOverallProductionSummary: async (targetDate, targetShift = 'ALL') => {
-    const store = getLocalStore();
+    const store = await syncStoreFromCloud({ date: targetDate, shift: targetShift });
     const activeDate = targetDate || new Date().toISOString().split('T')[0];
 
     const allRecs = (store.production_records || []).filter(r => r.date === activeDate);
@@ -1465,7 +1617,7 @@ export const api = {
   // DEDICATED MACHINE SUMMARY REPORT GENERATOR
   // ==========================================================================
   getMachineSummary: async (machineNumber, targetDate, targetShift = 'Shift A') => {
-    const store = getLocalStore();
+    const store = await syncStoreFromCloud({ date: targetDate, shift: targetShift });
     const activeDate = targetDate || new Date().toISOString().split('T')[0];
     const mNum = (machineNumber || 'NC-01').toUpperCase();
 
@@ -1656,7 +1808,7 @@ export const api = {
     try {
       return await request(`/production/shift-comparison?date=${date}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ date });
       const targetDate = date || new Date().toISOString().split('T')[0];
       const todayRecs = (store.production_records || []).filter(r => r.date === targetDate);
       return {
@@ -1689,13 +1841,20 @@ export const api = {
   createHandover: async (data) => {
     const store = getLocalStore();
     const newH = { ...data, id: Date.now(), created_at: new Date().toISOString() };
+
+    if (isSupabaseConfigured()) {
+      try {
+        const saved = await supabaseSaveHandover(newH);
+        if (saved && saved.id) newH.id = saved.id;
+      } catch (err) {
+        console.error('Supabase handover save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
+    }
+
     store.shift_handovers = [newH, ...(store.shift_handovers || [])];
     saveLocalStore(store);
     triggerCloudSync();
-
-    if (isSupabaseConfigured()) {
-      supabaseSaveHandover(newH).catch(console.warn);
-    }
 
     try {
       return await request('/handovers', { method: 'POST', body: JSON.stringify(data) });
@@ -1743,13 +1902,25 @@ export const api = {
   savePlan: async (planData) => {
     const store = getLocalStore();
     const p = { ...planData, id: Date.now(), created_at: new Date().toISOString() };
-    store.machine_plans = [...(store.machine_plans || []), p];
-    saveLocalStore(store);
-    triggerCloudSync();
 
     if (isSupabaseConfigured()) {
-      supabaseSavePlan(p).catch(console.warn);
+      try {
+        const saved = await supabaseSavePlan(p);
+        if (saved && saved.id) p.id = saved.id;
+      } catch (err) {
+        console.error('Supabase plan save failed:', err);
+        throw new Error('Database save failed: ' + err.message);
+      }
     }
+
+    const idx = (store.machine_plans || []).findIndex(
+      (x) => x.machine_number === p.machine_number && Number(x.plan_index) === Number(p.plan_index)
+    );
+    if (idx >= 0) store.machine_plans[idx] = p;
+    else store.machine_plans = [...(store.machine_plans || []), p];
+
+    saveLocalStore(store);
+    triggerCloudSync();
 
     try {
       return await request('/plans', { method: 'POST', body: JSON.stringify(planData) });
@@ -1759,6 +1930,13 @@ export const api = {
   },
 
   updatePlan: async (planId, planData) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseUpdatePlan(planId, planData);
+      } catch (err) {
+        console.error('Supabase plan update failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.machine_plans = (store.machine_plans || []).map((p) =>
       p.id === planId ? { ...p, ...planData } : p
@@ -1774,6 +1952,13 @@ export const api = {
   },
 
   deletePlan: async (planId) => {
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseDeletePlan(planId);
+      } catch (err) {
+        console.error('Supabase plan delete failed:', err);
+      }
+    }
     const store = getLocalStore();
     store.machine_plans = (store.machine_plans || []).filter((p) => p.id !== planId);
     saveLocalStore(store);
@@ -1848,7 +2033,7 @@ export const api = {
       if (shift) params.append('shift', shift);
       return await request(`/analytics?${params.toString()}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud({ date, shift });
       const targetDate = date || new Date().toISOString().split('T')[0];
       const todayRecs = (store.production_records || []).filter(r => r.date === targetDate);
       const totalActual = todayRecs.reduce((s, r) => s + (Number(r.actual_qty) || 0), 0);
@@ -1870,7 +2055,7 @@ export const api = {
       const q = new URLSearchParams(params).toString();
       return await request(`/reports/data${q ? '?' + q : ''}`);
     } catch (e) {
-      const store = getLocalStore();
+      const store = await syncStoreFromCloud(params);
       return {
         records: store.production_records || [],
         attendance: store.attendance || [],
@@ -1907,12 +2092,19 @@ export const api = {
 
   // Settings
   getSettings: async () => {
-    try {
-      return await request('/settings');
-    } catch (e) {
-      const store = getLocalStore();
-      return { settings: store.settings };
+    if (isSupabaseConfigured()) {
+      try {
+        const cloud = await supabaseGetSettings();
+        if (cloud && Object.keys(cloud).length > 0) {
+          const store = getLocalStore();
+          store.settings = { ...store.settings, ...cloud };
+          saveLocalStore(store);
+          return { settings: store.settings };
+        }
+      } catch (err) {}
     }
+    const store = getLocalStore();
+    return { settings: store.settings };
   },
 
   saveSettings: async (settingsData) => {
@@ -1920,6 +2112,16 @@ export const api = {
     store.settings = { ...store.settings, ...settingsData };
     saveLocalStore(store);
     triggerCloudSync();
+
+    if (isSupabaseConfigured()) {
+      try {
+        for (const [k, v] of Object.entries(settingsData)) {
+          await supabaseSaveSettings(k, v);
+        }
+      } catch (err) {
+        console.warn('Supabase settings save failed:', err);
+      }
+    }
 
     try {
       return await request('/settings', { method: 'POST', body: JSON.stringify(settingsData) });

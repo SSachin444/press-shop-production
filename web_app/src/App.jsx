@@ -31,7 +31,7 @@ import ActivityLogPage from './pages/ActivityLogPage';
 import MachineSummaryPage from './pages/MachineSummaryPage';
 
 import { api, getServerUrl } from './api';
-import { isSupabaseConfigured } from './supabase';
+import { isSupabaseConfigured, subscribeToCloudChanges } from './supabase';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // Default to the Home screen matching image
@@ -68,6 +68,24 @@ export default function App() {
   useEffect(() => {
     loadInitialState();
   }, [syncKey]);
+
+  // Realtime multi-device cloud synchronization listener
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+
+    let debounceTimer = null;
+    const unsubscribe = subscribeToCloudChanges((table) => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        setSyncKey((prev) => prev + 1);
+      }, 400);
+    });
+
+    return () => {
+      clearTimeout(debounceTimer);
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     loadNotifications();
@@ -157,6 +175,7 @@ export default function App() {
           onLoginSuccess={(user) => {
             setCurrentUser(user);
             setIsLoggedIn(true);
+            setSyncKey((prev) => prev + 1);
           }}
           onOpenWifiSettings={() => setShowWifiModal(true)}
           onOpenSupabaseSettings={() => setShowSupabaseModal(true)}
