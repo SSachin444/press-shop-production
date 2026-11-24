@@ -268,6 +268,13 @@ create policy "Allow anon full access to activity_logs" on activity_logs for all
 create policy "Allow anon full access to app_settings" on app_settings for all using (true) with check (true);
 create policy "Allow anon full access to downtime_codes" on downtime_codes for all using (true) with check (true);
 
+-- Grant schema, table, and sequence access to anon and authenticated roles
+grant usage on schema public to anon, authenticated, service_role;
+grant all on all tables in schema public to anon, authenticated, service_role;
+grant all on all sequences in schema public to anon, authenticated, service_role;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+
 -- Seed initial default 16 NC machines & 6 Tandem lines
 insert into machines (machine_number, machine_type, tonnage, production_target, status)
 values

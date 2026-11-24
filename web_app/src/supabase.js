@@ -2,8 +2,8 @@
 import { createClient } from '@supabase/supabase-js';
 
 // Default / Injected Credentials (from Vite Environment or LocalStorage)
-const ENV_URL = import.meta.env.VITE_SUPABASE_URL || '';
-const ENV_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const ENV_URL = import.meta.env.VITE_SUPABASE_URL || 'https://oyjefyeueetxboifukyr.supabase.co';
+const ENV_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_yd1zp9Wcufa-ZYpKv4DBbQ_wL-3xzhp';
 
 let supabaseInstance = null;
 let currentUrl = '';
