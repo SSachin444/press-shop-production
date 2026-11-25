@@ -24,3 +24,4 @@ __pycache__/
 dist/
 apk/
 *.apk
+!public/PRESS_SHOP_MFG-2.apk

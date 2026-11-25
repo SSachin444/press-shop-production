@@ -47,12 +47,15 @@ wheels/
 dist/
 web_app/dist/
 *.apk
+!web_app/public/PRESS_SHOP_MFG-2.apk
+!public/PRESS_SHOP_MFG-2.apk
 apk/
 web_app/apk/
 *.zip
 web_app.zip
 
-# Android and Gradle build files
+*.keystore
+*.jks
 android/.gradle/
 android/build/
 android/app/build/
