@@ -1,273 +1,260 @@
-import json
+import os
+import tempfile
 import unittest
 from datetime import date
-from app import app
-from database import init_db, get_db
 
-class TestPHABackend(unittest.TestCase):
+# Isolate test DB from pha_india.db BEFORE importing app/database
+_TEMP_DB_FILE = tempfile.NamedTemporaryFile(prefix="pha_test_", suffix=".db", delete=False)
+_TEMP_DB_FILE.close()
+os.environ["PHA_DB_PATH"] = _TEMP_DB_FILE.name
+os.environ["PHA_SESSION_SECRET"] = "test-only-ephemeral-secret-for-unit-suite"
+
+from app import app, _RATE_BUCKETS  # noqa: E402
+from bootstrap_auth import provision_accounts  # noqa: E402
+from database import get_db, init_db  # noqa: E402
+
+
+class TestPHASecurityAndAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         init_db()
-        conn = get_db()
-        conn.execute("""
-        INSERT OR IGNORE INTO employees 
-        (emp_id, name, department, designation, shift, assigned_machine, status, basic_salary, hra, da, conveyance, special_allowance, pf_deduction, esi_deduction, tds_deduction, ot_hourly_rate)
-        VALUES ('PHA-001', 'Ajay Kumar', 'NC Production', 'CNC Machinist', 'Shift A', 'NC-01', 'Active', 25000, 5000, 2000, 1500, 1000, 1800, 350, 0, 160)
-        """)
-        conn.commit()
-        conn.close()
+        # Provision temporary test accounts (disposable test-only passwords)
+        provision_accounts("TempAdmin!2026", "TempSuper!2026")
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            os.remove(_TEMP_DB_FILE.name)
+        except OSError:
+            pass
 
     def setUp(self):
         self.client = app.test_client()
+        _RATE_BUCKETS.clear()
 
-    def test_01_health(self):
-        res = self.client.get("/")
-        self.assertEqual(res.status_code, 200)
-        # Verify state endpoint
-        res_state = self.client.get("/api/state")
-        self.assertEqual(res_state.status_code, 200)
-        data = res_state.get_json()
-        self.assertEqual(data["status"], "success")
+    def _login(self, username, password, role):
+        res = self.client.post("/api/auth/login", json={"username": username, "password": password, "role": role})
+        return res
 
-    def test_02_state_compatibility(self):
-        res = self.client.get("/api/state")
-        self.assertEqual(res.status_code, 200)
-        data = res.get_json()
-        self.assertIn("employees", data)
-        self.assertIn("machines", data)
-        self.assertIn("attendance", data)
-        self.assertIn("production_records", data)
-        nc_count = sum(1 for m in data["machines"] if m["machine_type"] == "NC")
-        tandem_count = sum(1 for m in data["machines"] if m["machine_type"] == "Tandem")
-        self.assertEqual(nc_count, 16)
-        self.assertEqual(tandem_count, 6)
+    def test_01_unauthenticated_access_blocked(self):
+        self.assertEqual(self.client.get("/api/dashboard/kpis").status_code, 401)
+        self.assertEqual(self.client.get("/api/machines").status_code, 401)
+        self.assertEqual(self.client.get("/api/employees").status_code, 401)
+        self.assertEqual(self.client.get("/api/users").status_code, 401)
 
-    def test_03_dashboard_kpis(self):
-        res = self.client.get("/api/dashboard/kpis")
+    def test_02_temp_password_replacement_enforced(self):
+        # Admin signs in with temporary password -> must_change_password = True
+        res = self._login("admin", "TempAdmin!2026", "Admin")
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
-        self.assertIn("total_employees", data)
-        self.assertIn("shift_production", data)
-        self.assertEqual(data["total_nc_machines"], 16)
-        self.assertEqual(data["total_tandem_lines"], 6)
+        self.assertTrue(data["user"]["must_change_password"])
+        temp_token = data["token"]
 
-    def test_04_employee_workflow(self):
-        import time
-        uid = f"PHA-{int(time.time())}"
-        new_emp = {
-            "emp_id": uid,
-            "name": "R. Kumar",
-            "department": "NC Production",
-            "designation": "CNC Operator",
-            "shift": "Shift A",
-            "assigned_machine": "NC-01",
-            "basic_salary": 25000,
-            "hra": 5000,
-            "ot_hourly_rate": 150
-        }
-        post_res = self.client.post("/api/employees", json=new_emp)
-        self.assertIn(post_res.status_code, [200, 201])
+        # Blocked from app APIs until password is replaced
+        blocked = self.client.get("/api/machines", headers={"Authorization": f"Bearer {temp_token}"})
+        self.assertEqual(blocked.status_code, 403)
+        self.assertTrue(blocked.get_json().get("must_change_password"))
 
-        # Duplicate detection
-        dup_res = self.client.post("/api/employees", json=new_emp)
-        self.assertEqual(dup_res.status_code, 400)
+        # Weak password rejected
+        weak = self.client.post(
+            "/api/auth/change-password",
+            headers={"Authorization": f"Bearer {temp_token}"},
+            json={"current_password": "TempAdmin!2026", "new_password": "123"},
+        )
+        self.assertEqual(weak.status_code, 400)
 
-        # Retrieve
-        get_res = self.client.get(f"/api/employees/{uid}")
-        self.assertEqual(get_res.status_code, 200)
-        self.assertEqual(get_res.get_json()["employee"]["name"], "R. Kumar")
+        # Strong replacement succeeds
+        ok = self.client.post(
+            "/api/auth/change-password",
+            headers={"Authorization": f"Bearer {temp_token}"},
+            json={"current_password": "TempAdmin!2026", "new_password": "StrongAdmin#2026"},
+        )
+        self.assertEqual(ok.status_code, 200)
 
-        # Update
-        put_res = self.client.put(f"/api/employees/{uid}", json={"phone": "9876543210"})
-        self.assertEqual(put_res.status_code, 200)
+        # Now allowed into Admin APIs
+        allowed = self.client.get("/api/machines", headers={"Authorization": f"Bearer {temp_token}"})
+        self.assertEqual(allowed.status_code, 200)
 
-        # Delete
-        del_res = self.client.delete(f"/api/employees/{uid}")
-        self.assertEqual(del_res.status_code, 200)
-        # Verify employee is truly deleted
-        verify_get = self.client.get(f"/api/employees/{uid}")
-        self.assertEqual(verify_get.status_code, 404)
+    def test_03_generic_login_errors_and_role_session_guard(self):
+        bad_user = self._login("nonexistent", "wrong", "Admin")
+        bad_pw = self._login("admin", "wrongpw", "Admin")
+        self.assertEqual(bad_user.status_code, 401)
+        self.assertEqual(bad_pw.status_code, 401)
+        self.assertEqual(bad_user.get_json()["error"], bad_pw.get_json()["error"])
 
-    def test_05_attendance_and_overtime(self):
+        # Cannot obtain Admin/Supervisor via passwordless role-session
+        self.assertEqual(self.client.post("/api/auth/role-session", json={"role": "Admin"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/auth/role-session", json={"role": "Supervisor"}).status_code, 403)
+
+    def test_04_operator_and_dashboard_rbac_enforced(self):
+        op_res = self.client.post("/api/auth/role-session", json={"role": "Operator", "full_name": "Line Op 1"})
+        self.assertEqual(op_res.status_code, 200)
+        op_headers = {"Authorization": f"Bearer {op_res.get_json()['token']}"}
+
+        dash_res = self.client.post("/api/auth/role-session", json={"role": "Dashboard"})
+        self.assertEqual(dash_res.status_code, 200)
+        dash_headers = {"Authorization": f"Bearer {dash_res.get_json()['token']}"}
+
+        # Dashboard is strictly read-only on live cell status & production records
+        self.assertEqual(self.client.get("/api/dashboard/cell-status", headers=dash_headers).status_code, 200)
+        self.assertEqual(self.client.get("/api/production/records", headers=dash_headers).status_code, 200)
+        self.assertEqual(self.client.post("/api/production/records", headers=dash_headers, json={"machine_or_line": "NC-01"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/employees", headers=dash_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/reports/data", headers=dash_headers).status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/production/hourly", headers=dash_headers, json={"machine_or_line": "NC-01"}).status_code,
+            403,
+        )
+
+        # Operator cannot access Admin/Supervisor endpoints
+        self.assertEqual(self.client.get("/api/employees", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/attendance", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/reports/data", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/settings", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/users", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.get("/api/activity-logs", headers=op_headers).status_code, 403)
+        self.assertEqual(self.client.put("/api/machines/NC-01", headers=op_headers, json={"tonnage": 999}).status_code, 403)
+
+    def test_05_idempotent_production_and_unified_totals(self):
+        op_res = self.client.post("/api/auth/role-session", json={"role": "Operator", "full_name": "Op Test"})
+        op_headers = {"Authorization": f"Bearer {op_res.get_json()['token']}"}
+
+        # Replace supervisor temp password first
+        sup_login = self._login("supervisor", "TempSuper!2026", "Supervisor")
+        sup_token = sup_login.get_json()["token"]
+        self.client.post(
+            "/api/auth/change-password",
+            headers={"Authorization": f"Bearer {sup_token}"},
+            json={"current_password": "TempSuper!2026", "new_password": "StrongSuper#2026"},
+        )
+        sup_headers = {"Authorization": f"Bearer {sup_token}"}
+
         today = date.today().isoformat()
-        # Mark attendance for existing employee PHA-001
-        att_data = {
-            "emp_id": "PHA-001",
-            "date": today,
-            "shift": "Shift A",
-            "status": "Present",
-            "check_in_time": "06:02"
-        }
-        res_att = self.client.post("/api/attendance", json=att_data)
-        self.assertEqual(res_att.status_code, 200)
-
-        # Submit overtime
-        ot_data = {
-            "emp_id": "PHA-001",
-            "date": today,
-            "shift": "Shift A",
-            "ot_hours": 2.5,
-            "reason": "Production rush"
-        }
-        res_ot = self.client.post("/api/overtime", json=ot_data)
-        self.assertEqual(res_ot.status_code, 200)
-
-    def test_06_nc_and_tandem_production(self):
-        today = date.today().isoformat()
-        # NC production for NC-01
-        nc_payload = {
+        payload = {
+            "client_submission_id": "sub-uuid-001",
+            "plant_id": "Plant 1",
             "machine_or_line": "NC-01",
             "date": today,
             "shift": "Shift A",
-            "hour_interval": "Hour 1 (06:00-07:00)",
-            "operator_name": "Ajay Kumar",
-            "tonnage": 1000,
-            "target_qty": 75,
-            "actual_qty": 72,
-            "good_qty": 70,
-            "rejected_qty": 2,
+            "hour_interval": "Hour 1 (08:00 - 09:00)",
+            "operator_name": "Op Test",
+            "tool_number": "TL-900",
+            "uph": 10,
+            "actual_qty": 540,
+            "rejected_qty": 10,
             "downtime_minutes": 5,
-            "downtime_reason": "Tool adjustment"
+            "downtime_code": "D02",
+            "downtime_reason": "Tool Problem",
         }
-        res_nc = self.client.post("/api/production/nc", json=nc_payload)
-        self.assertEqual(res_nc.status_code, 200)
+        r1 = self.client.post("/api/production/hourly", headers=op_headers, json=payload)
+        self.assertEqual(r1.status_code, 200)
+        # Retry with same client_submission_id must deduplicate without error or duplicate row
+        r2 = self.client.post("/api/production/hourly", headers=op_headers, json=payload)
+        self.assertEqual(r2.status_code, 200)
 
-        # Tandem production for LP-1
-        tandem_payload = {
-            "machine_or_line": "LP-1",
-            "date": today,
-            "shift": "Shift A",
-            "hour_interval": "Hour 1 (06:00-07:00)",
-            "operator_name": "M. Selvam",
-            "tonnage": 1200,
-            "target_qty": 100,
-            "actual_qty": 98,
-            "good_qty": 96,
-            "rejected_qty": 2,
-            "downtime_minutes": 3,
-            "downtime_reason": "Die inspection"
-        }
-        res_tan = self.client.post("/api/production/tandem", json=tandem_payload)
-        self.assertEqual(res_tan.status_code, 200)
+        # Invalid quantities rejected
+        bad = {**payload, "client_submission_id": "sub-uuid-002", "rejected_qty": 600}
+        self.assertEqual(self.client.post("/api/production/hourly", headers=op_headers, json=bad).status_code, 400)
 
-    def test_07_hourly_production_and_shift_comparison(self):
-        today = date.today().isoformat()
-        # Test batch hourly saving
-        batch_payload = {
-            "records": [
-                {
-                    "production_type": "NC",
-                    "machine_or_line": "NC-01",
-                    "date": today,
-                    "shift": "Shift A",
-                    "hour_interval": "Hour 1 (06:00-07:00)",
-                    "target_qty": 75,
-                    "actual_qty": 72,
-                    "good_qty": 70,
-                    "rejected_qty": 2,
-                    "downtime_minutes": 0
-                },
-                {
-                    "production_type": "NC",
-                    "machine_or_line": "NC-01",
-                    "date": today,
-                    "shift": "Shift A",
-                    "hour_interval": "Hour 2 (07:00-08:00)",
-                    "target_qty": 75,
-                    "actual_qty": 75,
-                    "good_qty": 74,
-                    "rejected_qty": 1,
-                    "downtime_minutes": 0
-                }
-            ]
-        }
-        res_batch = self.client.post("/api/production/hourly", json=batch_payload)
-        self.assertEqual(res_batch.status_code, 200)
+        # Supervisor sees consistent totals across dashboard, cell-status, and reports
+        kpis = self.client.get(f"/api/dashboard/kpis?date={today}&shift=Shift+A", headers=sup_headers).get_json()
+        cells = self.client.get(f"/api/dashboard/cell-status?date={today}&shift=Shift+A", headers=sup_headers).get_json()
+        rep = self.client.get(f"/api/reports/data?from_date={today}&to_date={today}&shift=Shift+A", headers=sup_headers).get_json()
 
-        res_hourly = self.client.get(f"/api/production/hourly?date={today}&shift=Shift A")
-        self.assertEqual(res_hourly.status_code, 200)
-        data_h = res_hourly.get_json()
-        self.assertIn("records", data_h)
-        self.assertIn("summary", data_h)
+        self.assertEqual(kpis["totals"]["actual"], 540)
+        self.assertEqual(kpis["totals"]["target"], 600)
+        self.assertEqual(cells["totals"]["actual"], 540)
+        self.assertEqual(cells["totals"]["target"], 600)
+        self.assertEqual(rep["totals"]["actual"], 540)
+        self.assertEqual(rep["totals"]["target"], 600)
 
-        res_comp = self.client.get(f"/api/production/shift-comparison?date={today}")
-        self.assertEqual(res_comp.status_code, 200)
-        data_c = res_comp.get_json()
-        self.assertIn("Shift A", data_c["shifts"])
-        self.assertIn("Shift B", data_c["shifts"])
-        self.assertIn("Shift C", data_c["shifts"])
+        # Supervisor CANNOT edit machine configuration
+        self.assertEqual(self.client.put("/api/machines/NC-01", headers=sup_headers, json={"tonnage": 1200}).status_code, 403)
 
-    def test_08_shift_handover(self):
-        today = date.today().isoformat()
-        payload = {
-            "date": today,
-            "outgoing_shift": "Shift A",
-            "incoming_shift": "Shift B",
-            "department_or_machine": "NC-01",
-            "handover_notes": "Running smooth. Die set for next batch ready on table.",
-            "production_status": "72 pcs done",
-            "responsible_person": "Supervisor A"
-        }
-        res = self.client.post("/api/handovers", json=payload)
-        self.assertEqual(res.status_code, 201)
+    def test_06_admin_machine_config_concurrency_and_audit(self):
+        adm_token = self._login("admin", "StrongAdmin#2026", "Admin").get_json()["token"]
+        adm_headers = {"Authorization": f"Bearer {adm_token}"}
 
-    def test_09_salary_calculation(self):
-        # Salary endpoint requires Admin or Management role
-        headers = {"Authorization": "Bearer admin:Admin"}
-        res = self.client.get("/api/salary", headers=headers)
-        self.assertEqual(res.status_code, 200)
-        data = res.get_json()
-        self.assertIn("salary_sheets", data)
-        self.assertGreater(len(data["salary_sheets"]), 0)
-        # Verify calculation logic
-        sheet = data["salary_sheets"][0]
-        self.assertEqual(sheet["gross_salary"], sheet["basic_salary"] + sheet["hra"] + sheet["da"] + sheet["conveyance"] + sheet["special_allowance"] + sheet["ot_pay"])
-        self.assertEqual(sheet["net_salary"], sheet["gross_salary"] - sheet["total_deductions"])
+        machines = self.client.get("/api/machines", headers=adm_headers).get_json()["machines"]
+        nc1 = next(m for m in machines if m["machine_number"] == "NC-01")
+        v1 = nc1["version"]
 
-    def test_10_spa_state_persistence_and_employee_delete(self):
-        # 1. Post a full SPA state
-        spa_state = {
-            "manpower": [
-                {"id": "EMP-001", "empId": "EMP-001", "name": "John Doe", "machineId": "NC-01", "role": "Senior Operator", "status": "Present", "remarks": ""},
-                {"id": "EMP-002", "empId": "EMP-002", "name": "Jane Smith", "machineId": "NC-02", "role": "Operator", "status": "Present", "remarks": ""}
-            ],
-            "machines": [
-                {"id": "NC-01", "no": "NC-01", "tonnage": 200, "operation": "Press", "plan": 500, "status": "Active", "remarks": ""}
-            ],
-            "production": [
-                {"id": "prod-1", "date": "2026-10-26", "machineId": "NC-01", "toolNo": "ABC12", "hour": 1, "qty": 65, "operatorId": "EMP-001", "remarks": "Normal run"}
-            ],
-            "attendance": {
-                "2026-10-26": {"EMP-001": {"status": "Present", "remarks": "On time"}}
-            },
-            "settings": {"supervisor": "Kumar", "shift": "Shift A"},
-            "quick": {}
-        }
-        res = self.client.post("/api/state", json=spa_state)
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.get_json()["status"], "success")
+        # Valid Admin update increments version & records audit
+        upd = self.client.put(
+            "/api/machines/NC-01",
+            headers=adm_headers,
+            json={"tonnage": 1100, "production_target": 650, "version": v1},
+        )
+        self.assertEqual(upd.status_code, 200)
+        self.assertEqual(upd.get_json()["machine"]["version"], v1 + 1)
 
-        # 2. Get state back
-        res_get = self.client.get("/api/state")
-        self.assertEqual(res_get.status_code, 200)
-        data = res_get.get_json()
-        self.assertEqual(len(data["manpower"]), 2)
-        self.assertEqual(data["production"][0]["toolNo"], "ABC12")
-        self.assertEqual(data["settings"]["supervisor"], "Kumar")
+        # Stale version conflict rejected with 409
+        stale = self.client.put(
+            "/api/machines/NC-01",
+            headers=adm_headers,
+            json={"tonnage": 999, "version": v1},
+        )
+        self.assertEqual(stale.status_code, 409)
 
-        # 3. Delete an employee in SPA by removing EMP-002 from manpower
-        spa_state["manpower"] = [
-            {"id": "EMP-001", "empId": "EMP-001", "name": "John Doe", "machineId": "NC-01", "role": "Senior Operator", "status": "Present", "remarks": ""}
-        ]
-        res_del = self.client.post("/api/state", json=spa_state)
-        self.assertEqual(res_del.status_code, 200)
+        # Audit log records the change
+        logs = self.client.get("/api/activity-logs", headers=adm_headers).get_json()["logs"]
+        self.assertTrue(any(l["record_type"] == "Machine" and l["record_id"] == "NC-01" for l in logs))
 
-        # 4. Verify EMP-002 is deleted from state and database
-        res_after = self.client.get("/api/state")
-        data_after = res_after.get_json()
-        emp_ids = [m["empId"] for m in data_after["manpower"]]
-        self.assertIn("EMP-001", emp_ids)
-        self.assertNotIn("EMP-002", emp_ids)
+    def test_07_recovery_email_single_use_reset_and_rate_limit(self):
+        from security import hash_recovery_code
+
+        adm_token = self._login("admin", "StrongAdmin#2026", "Admin").get_json()["token"]
+        adm_headers = {"Authorization": f"Bearer {adm_token}"}
+
+        # Without SMTP configured, saving recovery email fails honestly (503) and stores unverified pending state
+        res = self.client.post("/api/auth/recovery-email", headers=adm_headers, json={"recovery_email": "ops-admin@phaindia.test"})
+        self.assertEqual(res.status_code, 503)
+        self.assertTrue(res.get_json().get("pending_verification"))
+
+        # Simulate verified recovery email + single-use reset token in isolated test SQLite
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = 'admin'")
+        admin_id = cur.fetchone()["id"]
+        cur.execute("UPDATE users SET recovery_email_verified = 1 WHERE id = ?", (admin_id,))
+        test_code = "482910"
+        code_hash = hash_recovery_code(admin_id, f"reset:{test_code}")
+        cur.execute(
+            "INSERT INTO password_recovery_tokens (user_id, target_role, email, code_hash, expires_at, requested_ip) VALUES (?, 'Admin', 'ops-admin@phaindia.test', ?, '2099-12-31T23:59:59', '127.0.0.1')",
+            (admin_id, code_hash),
+        )
+        conn.commit()
+        conn.close()
+
+        # First single-use reset succeeds
+        ok = self.client.post(
+            "/api/auth/reset-password",
+            json={"role": "Admin", "email": "ops-admin@phaindia.test", "code": test_code, "new_password": "RecoveredAdmin#2026"},
+        )
+        self.assertEqual(ok.status_code, 200)
+
+        # Reuse of same code fails (single-use enforced)
+        replay = self.client.post(
+            "/api/auth/reset-password",
+            json={"role": "Admin", "email": "ops-admin@phaindia.test", "code": test_code, "new_password": "AnotherStrong#2026"},
+        )
+        self.assertEqual(replay.status_code, 400)
+
+        # Verify new password works and supervisor cannot access recovery-email admin settings
+        new_login = self._login("admin", "RecoveredAdmin#2026", "Admin")
+        self.assertEqual(new_login.status_code, 200)
+        sup_token = self._login("supervisor", "StrongSuper#2026", "Supervisor").get_json()["token"]
+        sup_headers = {"Authorization": f"Bearer {sup_token}"}
+        self.assertEqual(self.client.get("/api/settings", headers=sup_headers).status_code, 403)
+        self.assertEqual(self.client.post("/api/auth/recovery-email", headers=sup_headers, json={"recovery_email": "x@y.com"}).status_code, 403)
+
+        # Rate limit kicks in after >3 forgot-password attempts
+        _RATE_BUCKETS.clear()
+        for _ in range(3):
+            self.client.post("/api/auth/forgot-password", json={"role": "Admin", "email": "nobody@test.local"})
+        throttled = self.client.post("/api/auth/forgot-password", json={"role": "Admin", "email": "nobody@test.local"})
+        self.assertEqual(throttled.status_code, 429)
+
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

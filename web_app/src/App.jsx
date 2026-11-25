@@ -1,453 +1,552 @@
-import React, { useState, useEffect } from 'react';
-import Sidebar from './components/Sidebar';
-import Header from './components/Header';
-import LoginScreen from './components/LoginScreen';
-import WiFiServerModal from './components/WiFiServerModal';
-import SupabaseModal from './components/SupabaseModal';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  ROLES,
+  canAccessTab,
+  getDefaultTabForRole,
+  getRouteByTab,
+  getTabFromPath,
+} from './config/roles';
+import { PLANTS, getCurrentShiftName } from './services/metrics';
+import { purgeLegacyLocalStorage } from './services/authSession';
+import { cloudApi } from './services/cloudClient';
+import { flushSyncQueue, getSyncQueue } from './services/syncQueue';
+
+import RoleGateway from './components/RoleGateway';
+import PasswordModal from './components/PasswordModal';
 import NotificationModal from './components/NotificationModal';
-import MobileNavBar from './components/MobileNavBar';
+import AppShell from './components/AppShell';
+import DashboardView from './components/DashboardView';
+import LiveCellStatusView from './components/LiveCellStatusView';
+import HourlyEntryView from './components/HourlyEntryView';
+import ProductionOverviewView from './components/ProductionOverviewView';
+import MachinesView from './components/MachinesView';
+import ReportsView from './components/ReportsView';
+import EmployeesView from './components/EmployeesView';
+import AttendanceView from './components/AttendanceView';
+import HandoversView from './components/HandoversView';
+import UsersView from './components/UsersView';
+import AuditLogView from './components/AuditLogView';
+import SettingsView from './components/SettingsView';
 
-// Pages
-import CellStatusPage from './pages/CellStatusPage';
-import PlanDetailsPage from './pages/PlanDetailsPage';
-import Dashboard from './pages/Dashboard';
-import ProductionHubPage from './pages/ProductionHubPage';
-import EmployeeManagement from './pages/EmployeeManagement';
-import AttendanceManagement from './pages/AttendanceManagement';
-import MachineManagement from './pages/MachineManagement';
-import NCProductionPage from './pages/NCProductionPage';
-import TandemProductionPage from './pages/TandemProductionPage';
-import HourlyProductionPage from './pages/HourlyProductionPage';
-import ThreeShiftManagement from './pages/ThreeShiftManagement';
-import ShiftHandoverPage from './pages/ShiftHandoverPage';
-import ReportsPage from './pages/ReportsPage';
-import SettingsPage from './pages/SettingsPage';
-
-// New Production Pages (Phase 2 Upgrade)
-import ProductionWorkspacePage from './pages/ProductionWorkspacePage';
-import ProductionDashboardPage from './pages/ProductionDashboardPage';
-import ProductionAnalyticsPage from './pages/ProductionAnalyticsPage';
-import ActivityLogPage from './pages/ActivityLogPage';
-import MachineSummaryPage from './pages/MachineSummaryPage';
-
-import { api, getServerUrl } from './api';
-import { isSupabaseConfigured, subscribeToCloudChanges } from './supabase';
+function getTodayIso() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard'); // Default to the Home screen matching image
-  const [selectedMachineForHourly, setSelectedMachineForHourly] = useState({ machine: 'NC-01', type: 'NC' });
-  const [selectedMachineForSummary, setSelectedMachineForSummary] = useState('NC-01');
-  const [sidebarOpen, setSidebarOpen] = useState(false); // Left Sidebar Drawer state
+  const [booting, setBooting] = useState(true);
+  const [session, setSession] = useState(null);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [routeNotice, setRouteNotice] = useState('');
 
-  // Plant Date and Shift State
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
-  const [selectedShift, setSelectedShift] = useState('Shift A');
-  const [currentShift, setCurrentShift] = useState('Shift A');
-  const [syncKey, setSyncKey] = useState(0);
-  const [loading, setLoading] = useState(false);
+  // Shared context filters
+  const [selectedPlant, setSelectedPlant] = useState(PLANTS[0]);
+  const [selectedDate, setSelectedDate] = useState(() => getTodayIso());
+  const [selectedShift, setSelectedShift] = useState(() => getCurrentShiftName());
+  const [machineGroup, setMachineGroup] = useState('ALL');
 
-  // Authentication State
-  const [isLoggedIn, setIsLoggedIn] = useState(() => {
-    return localStorage.getItem('pha_logged_in') === 'true';
-  });
+  // Core cloud state
+  const [machines, setMachines] = useState([]);
+  const [records, setRecords] = useState([]);
+  const [reportRecords, setReportRecords] = useState(null);
+  const [downtimes, setDowntimes] = useState([]);
+  const [downtimeCodes, setDowntimeCodes] = useState([]);
+  const [dataState, setDataState] = useState('loading'); // loading | ready | error
+  const [errorMessage, setErrorMessage] = useState('');
+  const [lastSyncedAt, setLastSyncedAt] = useState('');
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [pendingSyncCount, setPendingSyncCount] = useState(() => getSyncQueue().length);
 
-  const [currentUser, setCurrentUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem('pha_user');
-      return stored ? JSON.parse(stored) : { username: 'supervisor', full_name: 'Shift Supervisor', role: 'Supervisor', department: 'Press Shop MFG-2' };
-    } catch (e) {
-      return { username: 'supervisor', full_name: 'Shift Supervisor', role: 'Supervisor', department: 'Press Shop MFG-2' };
-    }
-  });
+  // Modals & Alerts
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [dismissedNotifications, setDismissedNotifications] = useState([]);
 
-  const [showWifiModal, setShowWifiModal] = useState(false);
-  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
-  const [showNotificationModal, setShowNotificationModal] = useState(false);
-  const [notifications, setNotifications] = useState([]);
+  const currentUser = session?.user || null;
+  const mustChangePassword = Boolean(currentUser?.must_change_password);
 
+  // Sync URL cleanly while enforcing strict role access
+  const navigateToTab = useCallback(
+    (requestedTab, { replace = false } = {}) => {
+      if (!currentUser?.role) return;
+      if (!canAccessTab(currentUser.role, requestedTab)) {
+        const fallback = getDefaultTabForRole(currentUser.role);
+        setActiveTab(fallback);
+        setRouteNotice(`Access restricted: "${requestedTab}" is not permitted for the ${currentUser.role} role.`);
+        const fallbackRoute = getRouteByTab(fallback);
+        window.history.replaceState({}, '', fallbackRoute.path);
+        return;
+      }
+      setRouteNotice('');
+      setActiveTab(requestedTab);
+      const route = getRouteByTab(requestedTab);
+      if (window.location.pathname !== route.path) {
+        if (replace) window.history.replaceState({}, '', route.path);
+        else window.history.pushState({}, '', route.path);
+      }
+    },
+    [currentUser?.role]
+  );
+
+  // Initial purge of insecure legacy localStorage & session verification
   useEffect(() => {
-    loadInitialState();
-  }, [syncKey]);
-
-  // Realtime multi-device cloud synchronization listener
-  useEffect(() => {
-    if (!isSupabaseConfigured()) return;
-
-    let debounceTimer = null;
-    const unsubscribe = subscribeToCloudChanges((table) => {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        setSyncKey((prev) => prev + 1);
-      }, 400);
-    });
-
+    purgeLegacyLocalStorage();
+    let mounted = true;
+    (async () => {
+      try {
+        const verified = await cloudApi.verifyExistingSession();
+        if (!mounted) return;
+        if (verified?.user?.role) {
+          setSession(verified);
+          const urlTab = getTabFromPath(window.location.pathname);
+          if (urlTab && canAccessTab(verified.user.role, urlTab)) {
+            setActiveTab(urlTab);
+          } else {
+            const defTab = getDefaultTabForRole(verified.user.role);
+            setActiveTab(defTab);
+            if (urlTab) {
+              setRouteNotice(`Redirected: ${verified.user.role} cannot access "${urlTab}".`);
+            }
+            window.history.replaceState({}, '', getRouteByTab(defTab).path);
+          }
+        }
+      } finally {
+        if (mounted) setBooting(false);
+      }
+    })();
     return () => {
-      clearTimeout(debounceTimer);
-      unsubscribe();
+      mounted = false;
     };
   }, []);
 
+  // Browser Back/Forward URL enforcement
   useEffect(() => {
-    loadNotifications();
-  }, [selectedDate, selectedShift, syncKey]);
-
-  const loadNotifications = async () => {
-    try {
-      const res = await api.getNotifications(selectedDate, selectedShift);
-      if (res && res.notifications) {
-        setNotifications(res.notifications);
+    if (!currentUser?.role) return undefined;
+    const onPopState = () => {
+      const urlTab = getTabFromPath(window.location.pathname);
+      if (!urlTab) {
+        navigateToTab(getDefaultTabForRole(currentUser.role), { replace: true });
+      } else {
+        navigateToTab(urlTab, { replace: true });
       }
-    } catch (e) {
-      console.warn('Notification sync notice:', e);
-    }
-  };
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [currentUser?.role, navigateToTab]);
 
-  const loadInitialState = async () => {
-    try {
-      setLoading(true);
-      const state = await api.getState();
-      if (state.current_shift) {
-        setCurrentShift(state.current_shift);
-        if (syncKey === 0) setSelectedShift(state.current_shift);
+  // Core data loader
+  const loadOperationalData = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!currentUser || mustChangePassword) return;
+      if (!silent) {
+        setDataState((prev) => (prev === 'ready' ? 'ready' : 'loading'));
       }
-    } catch (err) {
-      console.warn('Initial state sync notice:', err);
-    } finally {
-      setLoading(false);
+      setErrorMessage('');
+      try {
+        const [mList, rList, dtList, codesList] = await Promise.all([
+          cloudApi.getMachines(),
+          cloudApi.getProductionRecords({ date: selectedDate }),
+          cloudApi.getMachineDowntime(),
+          cloudApi.getDowntimeCodes(),
+        ]);
+        setMachines(mList || []);
+        setRecords(rList || []);
+        setDowntimes(dtList || []);
+        setDowntimeCodes(codesList || []);
+        setDataState('ready');
+        setLastSyncedAt(new Date().toISOString());
+      } catch (err) {
+        setDataState('error');
+        setErrorMessage(err?.message || 'Unable to synchronize shopfloor data from cloud backend.');
+      }
+    },
+    [currentUser, mustChangePassword, selectedDate]
+  );
+
+  // Load multi-day records when viewing Reports
+  useEffect(() => {
+    if (!currentUser || mustChangePassword || activeTab !== 'reports') return;
+    let mounted = true;
+    (async () => {
+      try {
+        const allRecs = await cloudApi.getProductionRecords({});
+        if (mounted) setReportRecords(allRecs || []);
+      } catch {
+        // Fallback to currently loaded date records if full scan is unavailable
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [currentUser, mustChangePassword, activeTab]);
+
+  useEffect(() => {
+    loadOperationalData();
+  }, [loadOperationalData]);
+
+  // Cloud Realtime Subscription + Periodic Freshness Refresh
+  useEffect(() => {
+    if (!currentUser || mustChangePassword) return undefined;
+    const unsubscribe = cloudApi.subscribeToChanges(() => {
+      loadOperationalData({ silent: true });
+    });
+    const pollMs = currentUser.role === ROLES.DASHBOARD ? 15000 : 45000;
+    const timer = setInterval(() => {
+      loadOperationalData({ silent: true });
+    }, pollMs);
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+      clearInterval(timer);
+    };
+  }, [currentUser, mustChangePassword, loadOperationalData]);
+
+  // Offline Queue Flush & Online Listeners
+  const handleFlushPendingQueue = useCallback(async () => {
+    const queue = getSyncQueue();
+    if (queue.length === 0) {
+      setPendingSyncCount(0);
+      return;
     }
-  };
-
-  const handleRefresh = () => {
-    setSyncKey((prev) => prev + 1);
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('pha_token');
-    localStorage.removeItem('pha_logged_in');
-    setIsLoggedIn(false);
-  };
-
-  const handleSwitchRole = () => {
-    setIsLoggedIn(false);
-  };
-
-  const handleLogHourlyForMachine = (machineNumber, machineType) => {
-    setSelectedMachineForHourly({ machine: machineNumber, type: machineType });
-    setActiveTab('hourly-production');
-  };
-
-  const handleSelectMachineSummary = (machineNumber) => {
-    if (machineNumber) setSelectedMachineForSummary(machineNumber);
-    setActiveTab('machine-summary');
-  };
-
-  const getPageTitle = () => {
-    switch (activeTab) {
-      case 'cell-status': return 'Live Cell Status & Output %';
-      case 'machine-summary': return 'Machine Summary & Asset Intelligence';
-      case 'production-hub': return 'Production Hub & Hourly Output';
-      case 'plans': return 'Machine Tool Plans (Max 5 Plans)';
-      case 'dashboard': return 'Plant Executive Dashboard';
-      case 'employees': return 'Employee Directory';
-      case 'attendance': return 'Daily Shift Attendance';
-      case 'machines': return 'Machine Directory';
-      case 'nc-production': return 'NC Press Production (16 Units)';
-      case 'tandem-production': return 'Tandem Production (6 Lines)';
-      case 'hourly-production': return 'Hourly Production Entry';
-      case 'three-shifts': return 'Three-Shift Performance';
-      case 'handovers': return 'Shift Handover Log';
-      case 'reports': return 'Reports & CSV Exports';
-      case 'settings': return 'System Settings';
-      // New Production Pages
-      case 'standard-production': return 'Production Workspace (Standard + Hourly)';
-      case 'production-dashboard': return 'Production Intelligence Dashboard';
-      case 'analytics': return 'Plant Production Analytics & Trends';
-      case 'activity-logs': return 'System Audit Activity Log';
-      default: return 'PRESS SHOP MFG-2';
+    const result = await flushSyncQueue((item) =>
+      cloudApi.submitProductionEntry(item.payload, { fromQueue: true })
+    );
+    setPendingSyncCount(result.remaining);
+    if (result.synced > 0) {
+      loadOperationalData({ silent: true });
     }
+  }, [loadOperationalData]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true);
+      handleFlushPendingQueue();
+    };
+    const onOffline = () => {
+      setIsOnline(false);
+    };
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [handleFlushPendingQueue]);
+
+  // Live Operational Notifications
+  const notifications = useMemo(() => {
+    const list = [];
+    (downtimes || [])
+      .filter((d) => d.status === 'Open')
+      .forEach((d) => {
+        const id = `dt-${d.id || d.machine_number}`;
+        if (!dismissedNotifications.includes(id)) {
+          list.push({
+            id,
+            type: 'warning',
+            category: 'Downtime Alert',
+            title: `${d.machine_number} Breakdown Open`,
+            message: d.reason || d.breakdown_reason || 'Active breakdown reported',
+            time: d.shift || '',
+          });
+        }
+      });
+    if (pendingSyncCount > 0 && !dismissedNotifications.includes('pending-sync')) {
+      list.push({
+        id: 'pending-sync',
+        type: 'info',
+        category: 'Offline Queue',
+        title: `${pendingSyncCount} Unsynced Entry Waiting`,
+        message: 'Queued hourly production records will automatically sync once cloud connection is online.',
+        time: 'Queued',
+      });
+    }
+    return list;
+  }, [downtimes, pendingSyncCount, dismissedNotifications]);
+
+  const handleAuthenticated = (nextSession) => {
+    setSession(nextSession);
+    const role = nextSession?.user?.role;
+    const urlTab = getTabFromPath(window.location.pathname);
+    const targetTab = urlTab && canAccessTab(role, urlTab) ? urlTab : getDefaultTabForRole(role);
+    setActiveTab(targetTab);
+    setRouteNotice('');
+    window.history.replaceState({}, '', getRouteByTab(targetTab).path);
   };
 
-  // If not logged in, show the full-screen passwordless role selector login page
-  if (!isLoggedIn) {
+  const handleSignOut = async () => {
+    await cloudApi.signOut();
+    setSession(null);
+    setMachines([]);
+    setRecords([]);
+    setReportRecords(null);
+    setRouteNotice('');
+    window.history.replaceState({}, '', '/');
+  };
+
+  if (booting) {
     return (
-      <>
-        <LoginScreen 
-          onLoginSuccess={(user) => {
-            setCurrentUser(user);
-            setIsLoggedIn(true);
-            setSyncKey((prev) => prev + 1);
-          }}
-          onOpenWifiSettings={() => setShowWifiModal(true)}
-          onOpenSupabaseSettings={() => setShowSupabaseModal(true)}
-        />
-        <WiFiServerModal 
-          isOpen={showWifiModal}
-          onClose={() => setShowWifiModal(false)}
-        />
-        <SupabaseModal 
-          isOpen={showSupabaseModal}
-          onClose={() => setShowSupabaseModal(false)}
-          onConnectionChanged={() => setSyncKey(k => k + 1)}
-        />
-      </>
+      <div className="gateway-page">
+        <div className="gateway-card" style={{ maxWidth: 420, textAlign: 'center' }}>
+          <div className="skeleton-line" style={{ height: 22, width: '60%', margin: '0 auto 12px' }} />
+          <div className="skeleton-line" style={{ height: 14, width: '80%', margin: '0 auto' }} />
+        </div>
+      </div>
     );
   }
 
-  return (
-    <div className="app-container">
-      {/* Sidebar Navigation (Accessible from the Left Side) */}
-      <Sidebar 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
-        currentUser={currentUser}
-        onLogout={handleLogout}
-        onOpenLogin={handleSwitchRole}
-        onOpenWifiModal={() => setShowWifiModal(true)}
-        isOpen={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-      />
+  if (!currentUser) {
+    return <RoleGateway onAuthenticated={handleAuthenticated} />;
+  }
 
-      {/* Main Content Area */}
-      <div className="main-wrapper">
-        <Header 
-          pageTitle={getPageTitle()}
-          selectedDate={selectedDate}
-          setSelectedDate={setSelectedDate}
-          selectedShift={selectedShift}
-          setSelectedShift={setSelectedShift}
-          currentShift={currentShift}
-          onRefresh={handleRefresh}
-          loading={loading}
-          currentUser={currentUser}
-          onOpenLogin={handleSwitchRole}
-          onOpenWifiModal={() => setShowWifiModal(true)}
-          onOpenSupabaseModal={() => setShowSupabaseModal(true)}
-          isSupabaseActive={isSupabaseConfigured()}
-          onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
-          notificationCount={notifications.length}
-          onOpenNotifications={() => setShowNotificationModal(true)}
+  // Enforce strong replacement before granting workspace access when temp password is active
+  if (mustChangePassword) {
+    return (
+      <div className="gateway-page">
+        <div className="gateway-card" style={{ maxWidth: 520 }}>
+          <div className="banner is-warn" style={{ marginBottom: 16 }}>
+            <span>
+              Security policy: your account is using an initial temporary password and must be replaced before entering the workspace.
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <strong>{currentUser.full_name || currentUser.username}</strong> ({currentUser.role})
+            </div>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleSignOut}>
+              Sign Out
+            </button>
+          </div>
+        </div>
+        <PasswordModal
+          isOpen={true}
+          forced={true}
+          onCompleted={() => {
+            setSession((prev) =>
+              prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+            );
+          }}
         />
-
-        <main className="content-area" style={{ 
-          flex: 1, 
-          paddingBottom: activeTab === 'standard-production' ? 0 : 72,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: activeTab === 'standard-production' ? 'hidden' : 'auto'
-        }}>
-          {/* 0. Production Hub (Hourly output, cell status %, NC, Tandem, plans) */}
-          {activeTab === 'production-hub' && (
-            <ProductionHubPage 
-              key={`prod-hub-${syncKey}-${selectedMachineForHourly.machine}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              initialSubTab="hourly"
-              selectedMachineForHourly={selectedMachineForHourly}
-              onLogHourlyForMachine={handleLogHourlyForMachine}
-            />
-          )}
-
-          {/* 1. Live Cell Status Page (Matching uploaded photo) */}
-          {activeTab === 'cell-status' && (
-            <CellStatusPage 
-              key={`cell-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              onLogHourlyForMachine={handleLogHourlyForMachine}
-              onSelectMachineSummary={handleSelectMachineSummary}
-            />
-          )}
-
-          {/* 2. Plan Details Page (Max 5 plans per machine by tool number) */}
-          {activeTab === 'plans' && (
-            <PlanDetailsPage 
-              key={`plan-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-            />
-          )}
-
-          {/* 3. Plant Dashboard */}
-          {activeTab === 'dashboard' && (
-            <Dashboard 
-              key={`dash-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift} 
-              setActiveTab={setActiveTab} 
-            />
-          )}
-
-          {/* 4. Hourly Production Page (Single fixed output, editable targets/actuals) */}
-          {activeTab === 'hourly-production' && (
-            <HourlyProductionPage 
-              key={`hour-${syncKey}-${selectedMachineForHourly.machine}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              initialMachine={selectedMachineForHourly.machine}
-              initialType={selectedMachineForHourly.type}
-            />
-          )}
-
-          {/* 5. NC Press Production */}
-          {activeTab === 'nc-production' && (
-            <NCProductionPage 
-              key={`nc-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              setActiveTab={setActiveTab} 
-            />
-          )}
-
-          {/* 6. Tandem Production */}
-          {activeTab === 'tandem-production' && (
-            <TandemProductionPage 
-              key={`tan-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              setActiveTab={setActiveTab} 
-            />
-          )}
-
-          {/* 7. Three-Shift Comparison */}
-          {activeTab === 'three-shifts' && (
-            <ThreeShiftManagement 
-              key={`shift-${syncKey}`}
-              selectedDate={selectedDate}
-            />
-          )}
-
-          {/* 8. Daily Attendance */}
-          {activeTab === 'attendance' && (
-            <AttendanceManagement 
-              key={`att-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift} 
-            />
-          )}
-
-          {/* 9. Employee Management */}
-          {activeTab === 'employees' && (
-            <EmployeeManagement key={`emp-${syncKey}`} />
-          )}
-
-          {/* 10. Machine Directory */}
-          {activeTab === 'machines' && (
-            <MachineManagement key={`mach-${syncKey}`} />
-          )}
-
-          {/* 11. Shift Handover Log */}
-          {activeTab === 'handovers' && (
-            <ShiftHandoverPage 
-              key={`han-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-              currentUser={currentUser}
-            />
-          )}
-
-          {/* 12. Reports & Exports */}
-          {activeTab === 'reports' && (
-            <ReportsPage 
-              key={`rep-${syncKey}`}
-              selectedDate={selectedDate} 
-              selectedShift={selectedShift}
-            />
-          )}
-
-          {/* 13. System Settings */}
-          {activeTab === 'settings' && (
-            <SettingsPage 
-              key={`set-${syncKey}`}
-              currentUser={currentUser}
-            />
-          )}
-
-          {/* 14. NEW: Production Workspace (Page 1 Standard + Page 2 Hourly side-by-side) */}
-          {activeTab === 'standard-production' && (
-            <ProductionWorkspacePage
-              key={`pws-${syncKey}`}
-              selectedDate={selectedDate}
-              selectedShift={selectedShift}
-              onSync={handleRefresh}
-              initialMachine={selectedMachineForHourly.machine}
-            />
-          )}
-
-          {/* 15. NEW: Production Dashboard (Page 3) */}
-          {activeTab === 'production-dashboard' && (
-            <ProductionDashboardPage
-              key={`pdash-${syncKey}`}
-              selectedDate={selectedDate}
-              selectedShift={selectedShift}
-              setActiveTab={setActiveTab}
-            />
-          )}
-
-          {/* 16. Plant Analytics & Trends */}
-          {activeTab === 'analytics' && (
-            <ProductionAnalyticsPage
-              key={`analytics-${syncKey}`}
-              selectedDate={selectedDate}
-              selectedShift={selectedShift}
-            />
-          )}
-
-          {/* 17. System Activity Logs */}
-          {activeTab === 'activity-logs' && (
-            <ActivityLogPage
-              key={`actlog-${syncKey}`}
-            />
-          )}
-
-          {/* 18. Dedicated Machine Summary Page (Phase 2 Upgrade) */}
-          {activeTab === 'machine-summary' && (
-            <MachineSummaryPage
-              key={`machsum-${syncKey}-${selectedMachineForSummary}`}
-              selectedDate={selectedDate}
-              selectedShift={selectedShift}
-              initialMachine={selectedMachineForSummary}
-              onNavigateHourly={(m) => {
-                setSelectedMachineForHourly({ machine: m, type: m.startsWith('NC') ? 'NC' : 'Tandem' });
-                setActiveTab('hourly-production');
-              }}
-            />
-          )}
-        </main>
       </div>
+    );
+  }
 
-      {/* NATIVE MOBILE BOTTOM NAVIGATION BAR */}
-      <MobileNavBar 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
+  // Full-screen Read-Only Shopfloor Monitor for Dashboard role
+  if (currentUser.role === ROLES.DASHBOARD) {
+    return (
+      <LiveCellStatusView
+        kioskMode={true}
+        selectedPlant={selectedPlant}
+        selectedDate={selectedDate}
+        selectedShift={selectedShift}
+        machines={machines}
+        records={records}
+        downtimes={downtimes}
+        dataState={dataState}
+        lastSyncedAt={lastSyncedAt}
+        isOnline={isOnline}
+        onRefresh={() => loadOperationalData()}
+        onExitKiosk={handleSignOut}
+      />
+    );
+  }
+
+  const renderActiveView = () => {
+    if (!canAccessTab(currentUser.role, activeTab)) {
+      return (
+        <div className="banner is-err">
+          <span>Access restricted for current role ({currentUser.role}).</span>
+        </div>
+      );
+    }
+
+    switch (activeTab) {
+      case 'dashboard':
+        return (
+          <DashboardView
+            selectedPlant={selectedPlant}
+            setSelectedPlant={setSelectedPlant}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedShift={selectedShift}
+            setSelectedShift={setSelectedShift}
+            machineGroup={machineGroup}
+            setMachineGroup={setMachineGroup}
+            machines={machines}
+            records={records}
+            downtimes={downtimes}
+            dataState={dataState}
+            errorMessage={errorMessage}
+            lastSyncedAt={lastSyncedAt}
+            isStale={Boolean(lastSyncedAt && !isOnline)}
+            onRetry={() => loadOperationalData()}
+            onNavigate={navigateToTab}
+          />
+        );
+      case 'hourly-production':
+        return (
+          <HourlyEntryView
+            selectedPlant={selectedPlant}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedShift={selectedShift}
+            setSelectedShift={setSelectedShift}
+            machines={machines}
+            records={records}
+            downtimeCodes={downtimeCodes}
+            currentUser={currentUser}
+            onEntrySaved={() => {
+              setPendingSyncCount(getSyncQueue().length);
+              loadOperationalData({ silent: true });
+            }}
+          />
+        );
+      case 'cell-status':
+        return (
+          <LiveCellStatusView
+            kioskMode={false}
+            selectedPlant={selectedPlant}
+            selectedDate={selectedDate}
+            selectedShift={selectedShift}
+            machines={machines}
+            records={records}
+            downtimes={downtimes}
+            dataState={dataState}
+            lastSyncedAt={lastSyncedAt}
+            isOnline={isOnline}
+            onRefresh={() => loadOperationalData()}
+          />
+        );
+      case 'production':
+        return (
+          <ProductionOverviewView
+            selectedPlant={selectedPlant}
+            setSelectedPlant={setSelectedPlant}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedShift={selectedShift}
+            setSelectedShift={setSelectedShift}
+            machines={machines}
+            records={records}
+            downtimes={downtimes}
+            currentUser={currentUser}
+            onNavigate={navigateToTab}
+            onRefresh={() => loadOperationalData()}
+          />
+        );
+      case 'employees':
+        return <EmployeesView machines={machines} currentUser={currentUser} />;
+      case 'attendance':
+        return (
+          <AttendanceView
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedShift={selectedShift}
+            setSelectedShift={setSelectedShift}
+            currentUser={currentUser}
+          />
+        );
+      case 'machines':
+        return (
+          <MachinesView
+            machines={machines}
+            downtimes={downtimes}
+            downtimeCodes={downtimeCodes}
+            currentUser={currentUser}
+            onReload={() => loadOperationalData({ silent: true })}
+          />
+        );
+      case 'handovers':
+        return (
+          <HandoversView
+            selectedDate={selectedDate}
+            selectedShift={selectedShift}
+            currentUser={currentUser}
+          />
+        );
+      case 'reports':
+        return (
+          <ReportsView
+            selectedPlant={selectedPlant}
+            selectedDate={selectedDate}
+            machines={machines}
+            records={reportRecords || records}
+            onRefresh={async () => {
+              await loadOperationalData();
+              try {
+                const allRecs = await cloudApi.getProductionRecords({});
+                setReportRecords(allRecs || []);
+              } catch {
+                // Keep existing date records
+              }
+            }}
+          />
+        );
+      case 'users':
+        return <UsersView currentUser={currentUser} />;
+      case 'activity-logs':
+        return <AuditLogView currentUser={currentUser} />;
+      case 'settings':
+        return (
+          <SettingsView
+            currentUser={currentUser}
+            onOpenChangePassword={() => setPasswordModalOpen(true)}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <>
+      <AppShell
+        activeTab={activeTab}
+        onSelectTab={navigateToTab}
         currentUser={currentUser}
-        onLogout={handleLogout}
-        onOpenLogin={handleSwitchRole}
-        onOpenWifiModal={() => setShowWifiModal(true)}
-        onOpenLeftSidebar={() => setSidebarOpen(true)}
-      />
-
-      {/* WiFi Backend Server Connection Modal */}
-      <WiFiServerModal 
-        isOpen={showWifiModal} 
-        onClose={() => setShowWifiModal(false)}
-        onServerChanged={() => setSyncKey(k => k + 1)}
-      />
-
-      {/* Supabase Cloud Database Connection Modal */}
-      <SupabaseModal 
-        isOpen={showSupabaseModal} 
-        onClose={() => setShowSupabaseModal(false)}
-        onConnectionChanged={() => setSyncKey(k => k + 1)}
-      />
-
-      {/* Plant Notifications & Alerts Modal */}
-      <NotificationModal 
-        isOpen={showNotificationModal} 
-        onClose={() => setShowNotificationModal(false)}
+        selectedPlant={selectedPlant}
+        selectedDate={selectedDate}
+        selectedShift={selectedShift}
+        isOnline={isOnline}
+        pendingSyncCount={pendingSyncCount}
+        onRetryPendingSync={handleFlushPendingQueue}
         notifications={notifications}
-        onClearAll={() => setNotifications([])}
-        onDismiss={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
+        onOpenNotifications={() => setNotificationsOpen(true)}
+        onOpenChangePassword={() => setPasswordModalOpen(true)}
+        onSignOut={handleSignOut}
+      >
+        {routeNotice && (
+          <div className="banner is-warn" style={{ marginBottom: 14 }}>
+            <span>{routeNotice}</span>
+          </div>
+        )}
+        {renderActiveView()}
+      </AppShell>
+
+      <PasswordModal
+        isOpen={passwordModalOpen}
+        forced={false}
+        onClose={() => setPasswordModalOpen(false)}
+        onCompleted={() => {
+          setSession((prev) =>
+            prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+          );
+        }}
       />
-    </div>
+
+      <NotificationModal
+        isOpen={notificationsOpen}
+        onClose={() => setNotificationsOpen(false)}
+        notifications={notifications}
+        onDismiss={(id) => setDismissedNotifications((prev) => [...prev, id])}
+        onClearAll={() =>
+          setDismissedNotifications((prev) => [...prev, ...notifications.map((n) => n.id)])
+        }
+      />
+    </>
   );
 }

@@ -1,0 +1,27 @@
+{
+  "rewrites": [
+    {
+      "source": "/download-apk",
+      "destination": "/PRESS_SHOP_MFG-2.apk"
+    },
+    {
+      "source": "/((?!assets/|PRESS_SHOP_MFG-2\\.apk|favicon\\.svg|manifest\\.json|.*\\.[a-zA-Z0-9]+$).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/PRESS_SHOP_MFG-2.apk",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/vnd.android.package-archive"
+        },
+        {
+          "key": "Content-Disposition",
+          "value": "attachment; filename=\"PRESS_SHOP_MFG-2.apk\""
+        }
+      ]
+    }
+  ]
+}
