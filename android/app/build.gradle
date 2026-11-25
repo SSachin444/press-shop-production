@@ -37,8 +37,8 @@ def readKeystoreProperties() {
 def envProps = readEnvConfig()
 def ksProps = readKeystoreProperties()
 
-def resolvedSupabaseUrl = (project.findProperty("SUPABASE_URL") ?: System.getenv("VITE_SUPABASE_URL") ?: envProps.getProperty("VITE_SUPABASE_URL") ?: "").toString().replace('"', '\\"')
-def resolvedSupabaseAnon = (project.findProperty("SUPABASE_ANON_KEY") ?: System.getenv("VITE_SUPABASE_ANON_KEY") ?: envProps.getProperty("VITE_SUPABASE_ANON_KEY") ?: "").toString().replace('"', '\\"')
+def resolvedSupabaseUrl = (project.findProperty("SUPABASE_URL") ?: System.getenv("VITE_SUPABASE_URL") ?: envProps.getProperty("VITE_SUPABASE_URL") ?: "https://oyjefyeueetxboifukyr.supabase.co").toString().replace('"', '\\"')
+def resolvedSupabaseAnon = (project.findProperty("SUPABASE_ANON_KEY") ?: System.getenv("VITE_SUPABASE_ANON_KEY") ?: envProps.getProperty("VITE_SUPABASE_ANON_KEY") ?: "sb_publishable_yd1zp9Wcufa-ZYpKv4DBbQ_wL-3xzhp").toString().replace('"', '\\"')
 def resolvedApiBaseUrl = (project.findProperty("PHA_API_BASE_URL") ?: System.getenv("PHA_API_BASE_URL") ?: "").toString().replace('"', '\\"')
 
 android {
