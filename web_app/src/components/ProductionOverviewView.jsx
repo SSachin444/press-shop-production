@@ -235,6 +235,12 @@ export default function ProductionOverviewView({
             {t.label}
           </button>
         ))}
+        {caps.canSubmitProduction && (
+          <button type="button" className="btn btn-green" onClick={() => onNavigate('tandem-production')}>
+            Open Tandem Multi-Part
+            <ArrowRight size={15} />
+          </button>
+        )}
       </div>
 
       {notice && (

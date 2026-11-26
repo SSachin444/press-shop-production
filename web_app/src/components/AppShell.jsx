@@ -21,6 +21,9 @@ import {
   Download,
   WifiOff,
   RefreshCw,
+  GitBranch,
+  Wrench,
+  BarChart3,
 } from 'lucide-react';
 import { getAllowedRoutes, getCapabilities, getRouteByTab } from '../config/roles';
 import LiveClock from './LiveClock';
@@ -28,8 +31,11 @@ import LiveClock from './LiveClock';
 const NAV_ICONS = {
   dashboard: LayoutDashboard,
   'hourly-production': Timer,
+  'tandem-production': GitBranch,
   'cell-status': Activity,
   production: Factory,
+  tools: Wrench,
+  'production-summary': BarChart3,
   employees: Users,
   attendance: CalendarCheck,
   machines: Cpu,

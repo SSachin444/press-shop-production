@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Download, Printer, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
-import { PLANTS, filterProductionRecords, buildCsvDocument } from '../services/metrics';
+import { PLANTS, filterProductionRecords, buildCsvDocument, deduplicateSlotDowntime } from '../services/metrics';
 
 export default function ReportsView({ selectedPlant, selectedDate, machines, records, onRefresh }) {
   const [plant, setPlant] = useState(selectedPlant || 'ALL');
@@ -33,13 +33,13 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
     const target = filteredRows.reduce((s, r) => s + r.target_qty, 0);
     const good = filteredRows.reduce((s, r) => s + r.good_qty, 0);
     const rejected = filteredRows.reduce((s, r) => s + r.rejected_qty, 0);
-    const downtime = filteredRows.reduce((s, r) => s + r.downtime_minutes, 0);
+    const { totalDowntimeMinutes } = deduplicateSlotDowntime(filteredRows);
     return {
       actual,
       target,
       good,
       rejected,
-      downtime,
+      downtime: totalDowntimeMinutes,
       achievementPct: target > 0 ? Number(((actual / target) * 100).toFixed(1)) : 0,
     };
   }, [filteredRows]);
@@ -69,12 +69,21 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
         { key: 'production_type', header: 'Group' },
         { key: 'machine_or_line', header: 'Machine' },
         { key: 'hour_interval', header: 'Hour Interval' },
+        { key: 'part_index', header: 'Part #' },
         { key: 'tool_number', header: 'Tool Number' },
         { key: 'operator_name', header: 'Operator' },
+        { key: 'uph', header: 'UPH' },
+        { key: 'running_minutes', header: 'Running (min)' },
         { key: 'target_qty', header: 'Target (pcs)' },
         { key: 'actual_qty', header: 'Actual (pcs)' },
         { key: 'good_qty', header: 'Good (pcs)' },
         { key: 'rejected_qty', header: 'Scrap (pcs)' },
+        {
+          key: 'scrap_reasons',
+          header: 'Scrap Reasons',
+          accessor: (r) =>
+            (r.scrap_breakdown || []).map((s) => `${s.reason_name}: ${s.qty}`).join('; '),
+        },
         { key: 'achievement_pct', header: 'Achievement (%)' },
         { key: 'downtime_minutes', header: 'Downtime (min)' },
         { key: 'downtime_reason', header: 'Downtime Reason' },
@@ -87,12 +96,16 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
         production_type: machineGroup,
         machine_or_line: `${filteredRows.length} records`,
         hour_interval: '',
+        part_index: '',
         tool_number: '',
         operator_name: '',
+        uph: '',
+        running_minutes: '',
         target_qty: totals.target,
         actual_qty: totals.actual,
         good_qty: totals.good,
         rejected_qty: totals.rejected,
+        scrap_reasons: '',
         achievement_pct: totals.achievementPct,
         downtime_minutes: totals.downtime,
         downtime_reason: '',

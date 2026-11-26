@@ -1,8 +1,30 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { CheckCircle2, AlertCircle, RefreshCw, Save } from 'lucide-react';
-import { HOUR_SLOTS, DEFAULT_DOWNTIME_CODES, SHIFTS } from '../services/metrics';
+import { CheckCircle2, AlertCircle, RefreshCw, Save, Plus, Trash2, Layers } from 'lucide-react';
+import {
+  HOUR_SLOTS,
+  SHIFTS,
+  calculateTargetFromUph,
+  getAchievementTone,
+  groupHourlyMachineEntries,
+  normalizeRecord,
+  validateDowntimeProblems,
+  validateScrapReasons,
+} from '../services/metrics';
 import { cloudApi } from '../services/cloudClient';
 import { createSubmissionId } from '../services/syncQueue';
+import { DowntimeProblemsPanel, ScrapSectionPanel, ToolSelectorField } from './ProductionEntryParts';
+
+function createEmptyPart() {
+  return {
+    tool_number: '',
+    part_name: '',
+    uph: '',
+    running_minutes: '60',
+    actual_qty: '',
+    rejected_qty: '',
+    scrap_breakdown: [],
+  };
+}
 
 export default function HourlyEntryView({
   selectedPlant,
@@ -11,36 +33,31 @@ export default function HourlyEntryView({
   selectedShift,
   setSelectedShift,
   machines,
+  tools = [],
   records,
   downtimeCodes,
   currentUser,
   onEntrySaved,
 }) {
-  const machineOptions = useMemo(
-    () => (machines || []).map((m) => m.machine_number),
-    [machines]
-  );
+  // Filter NC machines from Machine Directory (fallback to all if none labeled NC)
+  const ncMachineOptions = useMemo(() => {
+    const nc = (machines || []).filter((m) => m.machine_type === 'NC');
+    return nc.length > 0 ? nc : machines || [];
+  }, [machines]);
 
-  const [selectedMachine, setSelectedMachine] = useState('NC-01');
+  const [selectedMachine, setSelectedMachine] = useState('');
   const [selectedHour, setSelectedHour] = useState(HOUR_SLOTS[0].label);
   const [operatorName, setOperatorName] = useState(
     currentUser?.role === 'Operator' ? currentUser.full_name || '' : ''
   );
-  const [toolNumber, setToolNumber] = useState('');
-  // Controlled string inputs so users can select all, replace, and clear to "" cleanly (never stuck on "0")
-  const [uphInput, setUphInput] = useState('10');
-  const [actualInput, setActualInput] = useState('');
-  const [rejectedInput, setRejectedInput] = useState('');
-  const [downtimeInput, setDowntimeInput] = useState('');
-  const [downtimeCode, setDowntimeCode] = useState('D01');
+  const [parts, setParts] = useState([createEmptyPart()]);
+  const [downtimeProblems, setDowntimeProblems] = useState([]);
   const [remarks, setRemarks] = useState('');
 
   const [roster, setRoster] = useState([]);
-  const [syncStatus, setSyncStatus] = useState({ state: 'idle', message: '' }); // idle | saving | saved | offline | failed
+  const [syncStatus, setSyncStatus] = useState({ state: 'idle', message: '' });
   const [pendingSubmissionId, setPendingSubmissionId] = useState(() => createSubmissionId());
   const [lastPayload, setLastPayload] = useState(null);
-
-  const codes = downtimeCodes && downtimeCodes.length > 0 ? downtimeCodes : DEFAULT_DOWNTIME_CODES;
 
   useEffect(() => {
     cloudApi
@@ -50,112 +67,193 @@ export default function HourlyEntryView({
   }, []);
 
   useEffect(() => {
-    if (machineOptions.length > 0 && !machineOptions.includes(selectedMachine)) {
-      setSelectedMachine(machineOptions[0]);
+    if (ncMachineOptions.length > 0 && !ncMachineOptions.some((m) => m.machine_number === selectedMachine)) {
+      setSelectedMachine(ncMachineOptions[0].machine_number);
     }
-  }, [machineOptions, selectedMachine]);
+  }, [ncMachineOptions, selectedMachine]);
 
-  const machineRecords = useMemo(
-    () =>
-      (records || []).filter(
-        (r) =>
-          String(r.machine_or_line || '').toUpperCase() === selectedMachine.toUpperCase() &&
-          r.date === selectedDate &&
-          r.shift === selectedShift
-      ),
-    [records, selectedMachine, selectedDate, selectedShift]
+  const activeMachineObj = useMemo(
+    () => ncMachineOptions.find((m) => m.machine_number === selectedMachine) || null,
+    [ncMachineOptions, selectedMachine]
   );
 
-  // Prefill existing saved hour when machine/hour/shift changes
-  useEffect(() => {
-    const existing = machineRecords.find(
+  const machineHourlyGroups = useMemo(() => {
+    const filtered = (records || []).filter(
       (r) =>
-        r.hour_interval === selectedHour ||
-        String(r.hour_interval || '').includes(selectedHour.split(' (')[0])
+        String(r.machine_or_line || '').toUpperCase() === selectedMachine.toUpperCase() &&
+        r.date === selectedDate &&
+        r.shift === selectedShift
     );
-    if (existing) {
-      setOperatorName(existing.operator_name || operatorName);
-      setToolNumber(existing.tool_number || '');
-      setUphInput(existing.uph ? String(existing.uph) : uphInput);
-      setActualInput(String(existing.actual_qty ?? ''));
-      setRejectedInput(existing.rejected_qty ? String(existing.rejected_qty) : '');
-      setDowntimeInput(existing.downtime_minutes ? String(existing.downtime_minutes) : '');
-      setDowntimeCode(existing.downtime_code || 'D01');
-      setRemarks(existing.remarks || '');
+    return groupHourlyMachineEntries(filtered);
+  }, [records, selectedMachine, selectedDate, selectedShift]);
+
+  // Prefill ONLY when user changes selectedMachine, selectedHour, selectedDate, or selectedShift
+  // Never overwrite unsaved inputs on 5-second background refresh!
+  useEffect(() => {
+    if (!selectedMachine) return;
+    const slotKey = selectedHour.split(' (')[0];
+    const existingGroup = machineHourlyGroups.find(
+      (g) => g.hour_interval === selectedHour || String(g.hour_interval || '').includes(slotKey)
+    );
+    if (existingGroup && existingGroup.parts.length > 0) {
+      const sortedParts = [...existingGroup.parts]
+        .slice(0, 3)
+        .sort((a, b) => (a.part_index || 1) - (b.part_index || 1));
+
+      setOperatorName(sortedParts[0].operator_name || operatorName);
+      setParts(
+        sortedParts.map((p) => ({
+          tool_number: p.tool_number || '',
+          part_name: p.part_name || '',
+          uph: p.uph ? String(p.uph) : '',
+          running_minutes: p.running_minutes ? String(p.running_minutes) : '60',
+          actual_qty: String(p.actual_qty ?? ''),
+          rejected_qty: p.rejected_qty ? String(p.rejected_qty) : '',
+          scrap_breakdown: Array.isArray(p.scrap_breakdown) ? p.scrap_breakdown : [],
+        }))
+      );
+      const dtList = sortedParts[0].downtime_problems || [];
+      setDowntimeProblems(dtList);
+      setRemarks(sortedParts[0].remarks || '');
     } else {
-      setActualInput('');
-      setRejectedInput('');
-      setDowntimeInput('');
+      setParts([createEmptyPart()]);
+      setDowntimeProblems([]);
       setRemarks('');
     }
     setPendingSubmissionId(createSubmissionId());
     setSyncStatus({ state: 'idle', message: '' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMachine, selectedHour, selectedDate, selectedShift]);
 
-  const parsedUph = uphInput.trim() === '' ? NaN : Number(uphInput);
-  const parsedActual = actualInput.trim() === '' ? NaN : Number(actualInput);
-  const parsedRejected = rejectedInput.trim() === '' ? 0 : Number(rejectedInput);
-  const parsedDowntime = downtimeInput.trim() === '' ? 0 : Number(downtimeInput);
+  const updatePart = (idx, patch) => {
+    setParts((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+  };
 
-  const calculatedTarget = Number.isFinite(parsedUph) && parsedUph > 0 ? Math.round(parsedUph * 60) : 0;
-  const goodQty = Number.isFinite(parsedActual) ? Math.max(0, parsedActual - (Number.isFinite(parsedRejected) ? parsedRejected : 0)) : 0;
+  const handleAddPart = () => {
+    if (parts.length >= 3) return;
+    setParts((prev) => [...prev, createEmptyPart()]);
+  };
 
-  const validateAndBuildPayload = () => {
-    if (!selectedMachine) return { error: 'Please select a machine.' };
-    if (!selectedHour) return { error: 'Please select an hour interval.' };
-    if (!operatorName.trim()) return { error: 'Operator name or ID is required.' };
-    if (!toolNumber.trim()) return { error: 'Tool number is required.' };
-    if (!Number.isFinite(parsedUph) || parsedUph <= 0 || parsedUph > 2000) {
-      return { error: 'Enter a valid UPH rate greater than 0.' };
-    }
-    if (actualInput.trim() === '' || !Number.isInteger(parsedActual) || parsedActual < 0 || parsedActual > 100000) {
-      return { error: 'Enter a valid whole number for Actual Quantity (0 to 100,000).' };
-    }
-    if (!Number.isInteger(parsedRejected) || parsedRejected < 0 || parsedRejected > parsedActual) {
-      return { error: 'Rejected / Scrap quantity cannot be negative or exceed Actual Quantity.' };
-    }
-    if (!Number.isInteger(parsedDowntime) || parsedDowntime < 0 || parsedDowntime > 60) {
-      return { error: 'Hourly downtime minutes must be between 0 and 60.' };
-    }
+  const handleRemovePart = (idx) => {
+    if (parts.length <= 1) return;
+    setParts((prev) => prev.filter((_, i) => i !== idx));
+  };
 
-    const matchedCode = codes.find((c) => c.code === downtimeCode);
-    const pct = calculatedTarget > 0 ? Number(((parsedActual / calculatedTarget) * 100).toFixed(1)) : 0;
-    const isTandem = selectedMachine.startsWith('LP') || selectedMachine.startsWith('HP');
+  // Real-time aggregates across up to 3 parts
+  const summary = useMemo(() => {
+    const dtCheck = validateDowntimeProblems(downtimeProblems, 5, 60);
+    let totalActual = 0;
+    let totalTarget = 0;
+    let totalScrap = 0;
+
+    const partMetrics = parts.map((p) => {
+      const uph = Number(p.uph) || 0;
+      const runMin = Number(p.running_minutes) || 60;
+      const target = calculateTargetFromUph(uph, runMin);
+      const actual = Number(p.actual_qty) || 0;
+      const scrap = Number(p.rejected_qty) || 0;
+      const good = Math.max(0, actual - scrap);
+      const pct = target > 0 ? Number(((actual / target) * 100).toFixed(1)) : 0;
+
+      totalActual += actual;
+      totalTarget += target;
+      totalScrap += scrap;
+      return { target, actual, scrap, good, pct };
+    });
+
+    const totalGood = Math.max(0, totalActual - totalScrap);
+    const combinedPct = totalTarget > 0 ? Number(((totalActual / totalTarget) * 100).toFixed(1)) : 0;
+    return {
+      partMetrics,
+      totalActual,
+      totalTarget,
+      totalScrap,
+      totalGood,
+      combinedPct,
+      totalDowntime: dtCheck.totalMinutes,
+      dtValid: dtCheck.valid,
+      dtError: dtCheck.error,
+    };
+  }, [parts, downtimeProblems]);
+
+  const validateAndBuildBatch = () => {
+    if (!selectedDate) return { error: 'Please select a Date.' };
+    if (!selectedShift) return { error: 'Please select a Shift.' };
+    if (!operatorName.trim()) return { error: 'Please select or enter an Operator.' };
+    if (!selectedMachine) return { error: 'Please select an NC Machine.' };
+    if (!selectedHour) return { error: 'Please select an Hour interval.' };
+
+    const dtCheck = validateDowntimeProblems(downtimeProblems, 5, 60);
+    if (!dtCheck.valid) return { error: dtCheck.error };
+
+    const normalizedParts = [];
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const num = i + 1;
+      const uph = p.uph.trim() === '' ? NaN : Number(p.uph);
+      const runMin = p.running_minutes.trim() === '' ? 60 : Number(p.running_minutes);
+      const actual = p.actual_qty.trim() === '' ? NaN : Number(p.actual_qty);
+      const scrap = p.rejected_qty.trim() === '' ? 0 : Number(p.rejected_qty);
+
+      if (!String(p.tool_number || '').trim()) {
+        return { error: `Part ${num}: Tool Number is required.` };
+      }
+      if (!Number.isFinite(uph) || uph <= 0 || uph > 50000) {
+        return { error: `Part ${num}: Enter a valid UPH rate greater than 0.` };
+      }
+      if (!Number.isFinite(runMin) || runMin <= 0 || runMin > 60) {
+        return { error: `Part ${num}: Running duration must be between 1 and 60 minutes.` };
+      }
+      if (!Number.isInteger(actual) || actual < 0 || actual > 100000) {
+        return { error: `Part ${num}: Enter a valid whole number for Actual Production.` };
+      }
+      if (!Number.isInteger(scrap) || scrap < 0 || scrap > actual) {
+        return { error: `Part ${num}: Scrap quantity cannot be negative or exceed Actual Production.` };
+      }
+
+      const scrapCheck = validateScrapReasons(scrap, p.scrap_breakdown || [], 5);
+      if (!scrapCheck.valid) {
+        return { error: `Part ${num}: ${scrapCheck.error}` };
+      }
+
+      normalizedParts.push({
+        tool_number: String(p.tool_number).trim().toUpperCase(),
+        part_name: String(p.part_name || '').trim(),
+        uph,
+        running_minutes: runMin,
+        actual_qty: actual,
+        rejected_qty: scrap,
+        scrap_breakdown: scrapCheck.normalized,
+      });
+    }
 
     return {
       payload: {
+        isBatch: true,
         client_submission_id: pendingSubmissionId,
         plant_id: selectedPlant,
-        production_type: isTandem ? 'Tandem' : 'NC',
+        production_type: 'NC',
         machine_or_line: selectedMachine,
         date: selectedDate,
         shift: selectedShift,
         hour_interval: selectedHour,
         operator_name: operatorName.trim(),
-        tool_number: toolNumber.trim().toUpperCase(),
-        uph: parsedUph,
-        target_qty: calculatedTarget,
-        actual_qty: parsedActual,
-        good_qty: goodQty,
-        rejected_qty: parsedRejected,
-        downtime_minutes: parsedDowntime,
-        downtime_code: downtimeCode,
-        downtime_reason: parsedDowntime > 0 ? matchedCode?.name || 'Downtime' : '',
+        tonnage: activeMachineObj?.tonnage || 0,
+        parts: normalizedParts,
+        downtime_problems: dtCheck.normalized,
         remarks: remarks.trim(),
-        production_pct: pct,
-        hourly_output_pct: pct,
         entry_time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       },
     };
   };
 
   const executeSubmit = async (payloadToSend) => {
-    setSyncStatus({ state: 'saving', message: 'Saving production entry to cloud...' });
+    setSyncStatus({ state: 'saving', message: 'Saving multi-part hourly production to cloud...' });
     try {
-      await cloudApi.submitProductionEntry(payloadToSend);
+      await cloudApi.submitProductionBatch(payloadToSend);
       setSyncStatus({
         state: 'saved',
-        message: `Saved ${payloadToSend.machine_or_line} (${payloadToSend.hour_interval}): ${payloadToSend.actual_qty} pcs confirmed.`,
+        message: `Saved ${payloadToSend.machine_or_line} (${payloadToSend.hour_interval}): ${payloadToSend.parts.length} part(s), ${summary.totalActual.toLocaleString()} total pcs confirmed.`,
       });
       setPendingSubmissionId(createSubmissionId());
       setLastPayload(null);
@@ -165,7 +263,7 @@ export default function HourlyEntryView({
       if (err.isOffline || (typeof navigator !== 'undefined' && !navigator.onLine)) {
         setSyncStatus({
           state: 'offline',
-          message: 'Offline: entry queued locally and will sync automatically when online.',
+          message: 'Offline: multi-part entry queued safely and will sync when back online.',
         });
       } else {
         setSyncStatus({
@@ -179,7 +277,7 @@ export default function HourlyEntryView({
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (syncStatus.state === 'saving') return;
-    const { payload, error } = validateAndBuildPayload();
+    const { payload, error } = validateAndBuildBatch();
     if (error) {
       setSyncStatus({ state: 'failed', message: error });
       return;
@@ -187,14 +285,20 @@ export default function HourlyEntryView({
     await executeSubmit(payload);
   };
 
+  const part1 = parts[0];
+  const part1Metrics = summary.partMetrics[0];
+  const tone = getAchievementTone(summary.combinedPct, summary.totalTarget);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section className="surface-card" aria-labelledby="hourly-entry-heading">
         <div className="section-header">
           <div>
-            <h2 id="hourly-entry-heading" className="section-title">Hourly Production Entry</h2>
+            <h2 id="hourly-entry-heading" className="section-title">
+              NC Hourly Production Entry (Up to 3 Parts / Machine / Hour)
+            </h2>
             <p className="section-subtitle">
-              Shift target is calculated automatically from UPH (UPH × 60). Leave fields clear until confirmed.
+              Target = UPH × Running Duration (hours). Supports 1–3 parts per hour, up to 5 scrap reasons per part, and up to 5 downtime problems.
             </p>
           </div>
           {syncStatus.state !== 'idle' && (
@@ -235,11 +339,7 @@ export default function HourlyEntryView({
               {syncStatus.message}
             </span>
             {syncStatus.state === 'failed' && lastPayload && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => executeSubmit(lastPayload)}
-              >
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => executeSubmit(lastPayload)}>
                 <RefreshCw size={14} />
                 <span>Retry Sync</span>
               </button>
@@ -248,12 +348,12 @@ export default function HourlyEntryView({
         )}
 
         <form onSubmit={handleSubmit} noValidate>
-          {/* Context Row */}
+          {/* STEPS 1–4: 1. Date | 2. Shift | 3. Operator | 4. Machine */}
           <div className="filter-bar" style={{ marginBottom: 14 }}>
             <div className="field-group">
-              <label className="field-label" htmlFor="entry-date">Date</label>
+              <label className="field-label" htmlFor="nc-entry-date">1. Date *</label>
               <input
-                id="entry-date"
+                id="nc-entry-date"
                 type="date"
                 className="field-input tabular"
                 value={selectedDate}
@@ -262,9 +362,9 @@ export default function HourlyEntryView({
             </div>
 
             <div className="field-group">
-              <label className="field-label" htmlFor="entry-shift">Shift</label>
+              <label className="field-label" htmlFor="nc-entry-shift">2. Shift *</label>
               <select
-                id="entry-shift"
+                id="nc-entry-shift"
                 className="field-select"
                 value={selectedShift}
                 onChange={(e) => setSelectedShift(e.target.value)}
@@ -276,192 +376,336 @@ export default function HourlyEntryView({
             </div>
 
             <div className="field-group">
-              <label className="field-label" htmlFor="entry-machine">Machine *</label>
+              <label className="field-label" htmlFor="nc-entry-operator">3. Operator *</label>
               <select
-                id="entry-machine"
+                id="nc-entry-operator"
                 className="field-select"
+                value={roster.some((op) => op.name === operatorName) ? operatorName : operatorName ? '__CUSTOM__' : ''}
+                onChange={(e) => {
+                  if (e.target.value === '__CUSTOM__') setOperatorName('');
+                  else setOperatorName(e.target.value);
+                }}
+              >
+                <option value="">-- Select Operator --</option>
+                {roster.map((op) => (
+                  <option key={op.emp_id} value={op.name}>
+                    {op.name} ({op.emp_id})
+                  </option>
+                ))}
+                <option value="__CUSTOM__">+ Enter Custom Operator</option>
+              </select>
+              {(!operatorName || !roster.some((op) => op.name === operatorName)) && (
+                <input
+                  type="text"
+                  className="field-input"
+                  aria-label="Operator Name manual entry"
+                  value={operatorName}
+                  onChange={(e) => setOperatorName(e.target.value)}
+                  placeholder="Type operator name"
+                  style={{ marginTop: 4 }}
+                />
+              )}
+            </div>
+
+            <div className="field-group">
+              <label className="field-label" htmlFor="nc-entry-machine">4. Machine (NC) *</label>
+              <select
+                id="nc-entry-machine"
+                className="field-select mono"
                 value={selectedMachine}
                 onChange={(e) => setSelectedMachine(e.target.value)}
               >
-                {machineOptions.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-hour">Hour Interval *</label>
-              <select
-                id="entry-hour"
-                className="field-select"
-                value={selectedHour}
-                onChange={(e) => setSelectedHour(e.target.value)}
-              >
-                {HOUR_SLOTS.map((h) => (
-                  <option key={h.key} value={h.label}>{h.label}</option>
+                {ncMachineOptions.map((m) => (
+                  <option key={m.machine_number} value={m.machine_number}>
+                    {m.machine_number} ({m.tonnage}T • {m.status || 'Idle'})
+                  </option>
                 ))}
               </select>
             </div>
           </div>
 
-          {/* Primary Shopfloor Entry Fields */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginBottom: 14 }}>
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-actual">Actual Quantity (pcs) *</label>
-              <input
-                id="entry-actual"
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                className="field-input tabular"
-                value={actualInput}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d+$/.test(v)) setActualInput(v);
-                }}
-                onFocus={(e) => e.target.select()}
-                placeholder="Enter produced pcs"
-                required
-              />
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-uph">UPH Rate (Target: {calculatedTarget} pcs) *</label>
-              <input
-                id="entry-uph"
-                type="text"
-                inputMode="decimal"
-                className="field-input tabular"
-                value={uphInput}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d*\.?\d*$/.test(v)) setUphInput(v);
-                }}
-                onFocus={(e) => e.target.select()}
-                placeholder="e.g. 10"
-                required
-              />
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-operator">Operator Name *</label>
-              <input
-                id="entry-operator"
-                type="text"
-                list="operator-roster-list"
-                className="field-input"
-                value={operatorName}
-                onChange={(e) => setOperatorName(e.target.value)}
-                placeholder="Operator name"
-                required
-              />
-              <datalist id="operator-roster-list">
-                {roster.map((op) => (
-                  <option key={op.emp_id} value={op.name}>{op.emp_id}</option>
-                ))}
-              </datalist>
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-tool">Tool / Die Number *</label>
-              <input
-                id="entry-tool"
-                type="text"
-                className="field-input mono"
-                value={toolNumber}
-                onChange={(e) => setToolNumber(e.target.value.toUpperCase())}
-                placeholder="e.g. TL-1001"
-                required
-              />
-            </div>
-          </div>
-
-          {/* Quality & Downtime Row */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-scrap">Scrap / Rejected (pcs)</label>
-              <input
-                id="entry-scrap"
-                type="text"
-                inputMode="numeric"
-                className="field-input tabular"
-                value={rejectedInput}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d+$/.test(v)) setRejectedInput(v);
-                }}
-                onFocus={(e) => e.target.select()}
-                placeholder="0"
-              />
-            </div>
-
-            <div className="field-group">
-              <label className="field-label">Good Parts (Calculated)</label>
-              <div className="field-input tabular" style={{ background: 'var(--bg-subtle)', display: 'flex', alignItems: 'center', fontWeight: 700 }}>
-                {Number.isFinite(parsedActual) ? `${goodQty.toLocaleString()} pcs` : '—'}
+          {/* STEPS 5–10 (PART 1 IN EXACT ENTRY ORDER: 5. UPH | 6. Tool Number | 7. Hour | 8. Actual Production | 9. Scrap | 10. Scrap Reasons) */}
+          <div className="part-entry-card" style={{ marginBottom: 14 }}>
+            <div className="part-entry-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="status-pill is-orange">Part 1</span>
+                <strong>Primary Part Entry</strong>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span className="status-pill tabular">
+                  Target: {part1Metrics.target.toLocaleString()} pcs • Good: {part1Metrics.good.toLocaleString()} pcs • {part1Metrics.pct}%
+                </span>
               </div>
             </div>
 
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-dt-mins">Downtime (Minutes)</label>
-              <input
-                id="entry-dt-mins"
-                type="text"
-                inputMode="numeric"
-                className="field-input tabular"
-                value={downtimeInput}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d+$/.test(v)) setDowntimeInput(v);
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 12, marginBottom: 12 }}>
+              <div className="field-group">
+                <label className="field-label" htmlFor="nc-p1-uph">5. UPH (Units/Hr) *</label>
+                <input
+                  id="nc-p1-uph"
+                  type="text"
+                  inputMode="decimal"
+                  className="field-input tabular"
+                  value={part1.uph}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^\d*\.?\d*$/.test(v)) updatePart(0, { uph: v });
+                  }}
+                  onFocus={(e) => e.target.select()}
+                  placeholder="e.g. 1200"
+                  required
+                />
+              </div>
+
+              <ToolSelectorField
+                id="nc-p1-tool"
+                label="6. Tool Number *"
+                value={part1.tool_number}
+                tools={tools}
+                machineType="NC"
+                onChange={(val, matched) => {
+                  const patch = { tool_number: val };
+                  if (matched) {
+                    if (matched.part_name) patch.part_name = matched.part_name;
+                    if (matched.standard_uph > 0 && !part1.uph) patch.uph = String(matched.standard_uph);
+                  }
+                  updatePart(0, patch);
                 }}
-                onFocus={(e) => e.target.select()}
-                placeholder="0"
               />
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nc-entry-hour">7. Hour *</label>
+                <select
+                  id="nc-entry-hour"
+                  className="field-select"
+                  value={selectedHour}
+                  onChange={(e) => setSelectedHour(e.target.value)}
+                >
+                  {HOUR_SLOTS.map((h) => (
+                    <option key={h.key} value={h.label}>{h.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nc-p1-run">Running Duration (min)</label>
+                <input
+                  id="nc-p1-run"
+                  type="text"
+                  inputMode="numeric"
+                  className="field-input tabular"
+                  value={part1.running_minutes}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^\d+$/.test(v)) updatePart(0, { running_minutes: v });
+                  }}
+                  placeholder="60"
+                />
+              </div>
+
+              <div className="field-group">
+                <label className="field-label" htmlFor="nc-p1-actual">8. Actual Production *</label>
+                <input
+                  id="nc-p1-actual"
+                  type="text"
+                  inputMode="numeric"
+                  className="field-input tabular"
+                  value={part1.actual_qty}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^\d+$/.test(v)) updatePart(0, { actual_qty: v });
+                  }}
+                  onFocus={(e) => e.target.select()}
+                  placeholder="Enter produced pcs"
+                  required
+                />
+              </div>
             </div>
 
-            <div className="field-group">
-              <label className="field-label" htmlFor="entry-dt-code">Downtime Code</label>
-              <select
-                id="entry-dt-code"
-                className="field-select"
-                value={downtimeCode}
-                onChange={(e) => setDowntimeCode(e.target.value)}
-              >
-                {codes.map((c) => (
-                  <option key={c.code} value={c.code}>{c.code} — {c.name}</option>
-                ))}
-              </select>
-            </div>
+            {/* 9. Scrap & 10. Scrap Reasons for Part 1 */}
+            <ScrapSectionPanel
+              partNumber={1}
+              idPrefix="nc-p1"
+              scrapQty={part1.rejected_qty}
+              onChangeScrapQty={(val) => updatePart(0, { rejected_qty: val })}
+              reasons={part1.scrap_breakdown}
+              onChangeReasons={(list) => updatePart(0, { scrap_breakdown: list })}
+              actualQty={part1Metrics.actual}
+            />
+          </div>
 
+          {/* ADDITIONAL PARTS (PART 2 & PART 3 — MAX 3 PARTS PER MACHINE / HOUR) */}
+          {parts.slice(1).map((part, relIdx) => {
+            const idx = relIdx + 1;
+            const pm = summary.partMetrics[idx];
+            return (
+              <div key={idx} className="part-entry-card" style={{ marginBottom: 14 }}>
+                <div className="part-entry-head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="status-pill is-ok">Part {idx + 1}</span>
+                    <strong>Additional Part in Same Hour</strong>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="status-pill tabular">
+                      Target: {pm.target.toLocaleString()} pcs • Good: {pm.good.toLocaleString()} pcs • {pm.pct}%
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => handleRemovePart(idx)}
+                      aria-label={`Remove Part ${idx + 1}`}
+                    >
+                      <Trash2 size={13} />
+                      <span>Remove Part</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 12, marginBottom: 12 }}>
+                  <ToolSelectorField
+                    id={`nc-p${idx + 1}-tool`}
+                    label={`Part ${idx + 1} Tool Number *`}
+                    value={part.tool_number}
+                    tools={tools}
+                    machineType="NC"
+                    onChange={(val, matched) => {
+                      const patch = { tool_number: val };
+                      if (matched) {
+                        if (matched.part_name) patch.part_name = matched.part_name;
+                        if (matched.standard_uph > 0 && !part.uph) patch.uph = String(matched.standard_uph);
+                      }
+                      updatePart(idx, patch);
+                    }}
+                  />
+
+                  <div className="field-group">
+                    <label className="field-label" htmlFor={`nc-p${idx + 1}-uph`}>UPH (Units/Hr) *</label>
+                    <input
+                      id={`nc-p${idx + 1}-uph`}
+                      type="text"
+                      inputMode="decimal"
+                      className="field-input tabular"
+                      value={part.uph}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '' || /^\d*\.?\d*$/.test(v)) updatePart(idx, { uph: v });
+                      }}
+                      placeholder="e.g. 800"
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <label className="field-label" htmlFor={`nc-p${idx + 1}-run`}>Running Duration (min)</label>
+                    <input
+                      id={`nc-p${idx + 1}-run`}
+                      type="text"
+                      inputMode="numeric"
+                      className="field-input tabular"
+                      value={part.running_minutes}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '' || /^\d+$/.test(v)) updatePart(idx, { running_minutes: v });
+                      }}
+                      placeholder="60"
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <label className="field-label" htmlFor={`nc-p${idx + 1}-actual`}>Actual Production *</label>
+                    <input
+                      id={`nc-p${idx + 1}-actual`}
+                      type="text"
+                      inputMode="numeric"
+                      className="field-input tabular"
+                      value={part.actual_qty}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '' || /^\d+$/.test(v)) updatePart(idx, { actual_qty: v });
+                      }}
+                      placeholder="Enter produced pcs"
+                    />
+                  </div>
+                </div>
+
+                <ScrapSectionPanel
+                  partNumber={idx + 1}
+                  idPrefix={`nc-p${idx + 1}`}
+                  scrapQty={part.rejected_qty}
+                  onChangeScrapQty={(val) => updatePart(idx, { rejected_qty: val })}
+                  reasons={part.scrap_breakdown}
+                  onChangeReasons={(list) => updatePart(idx, { scrap_breakdown: list })}
+                  actualQty={pm.actual}
+                />
+              </div>
+            );
+          })}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
+            <button
+              type="button"
+              className="btn btn-green btn-sm"
+              onClick={handleAddPart}
+              disabled={parts.length >= 3}
+            >
+              <Plus size={14} />
+              <span>Add Part ({parts.length}/3 Max)</span>
+            </button>
+
+            <div className="hourly-calc-strip">
+              <span><strong>Combined Hourly Output:</strong> <span className="tabular">{summary.totalActual.toLocaleString()} pcs</span></span>
+              <span><strong>Combined Target:</strong> <span className="tabular">{summary.totalTarget.toLocaleString()} pcs</span></span>
+              <span>
+                <strong>Achievement:</strong>{' '}
+                <span className={`status-pill tabular ${tone === 'green' ? 'is-ok' : tone === 'orange' ? 'is-warn' : tone === 'red' ? 'is-err' : ''}`}>
+                  {summary.totalTarget > 0 ? `${summary.combinedPct}%` : '—'}
+                </span>
+              </span>
+              <span><strong>Total Scrap:</strong> <span className="tabular">{summary.totalScrap.toLocaleString()} pcs</span></span>
+            </div>
+          </div>
+
+          {/* STEPS 11–12: 11. Downtime (auto total) & 12. Downtime Reasons / Problems */}
+          <DowntimeProblemsPanel
+            problems={downtimeProblems}
+            onChangeProblems={setDowntimeProblems}
+            downtimeCodes={downtimeCodes}
+            machine={selectedMachine}
+            operator={operatorName}
+            date={selectedDate}
+            shift={selectedShift}
+            hour={selectedHour}
+          />
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'end', marginTop: 14 }}>
             <div className="field-group">
-              <label className="field-label" htmlFor="entry-remarks">Remarks</label>
+              <label className="field-label" htmlFor="nc-remarks">Shift / Hour Remarks</label>
               <input
-                id="entry-remarks"
+                id="nc-remarks"
                 type="text"
                 className="field-input"
                 value={remarks}
                 onChange={(e) => setRemarks(e.target.value)}
-                placeholder="Optional note"
+                placeholder="Optional production or die changeover notes"
               />
             </div>
-          </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
             <button type="submit" className="btn btn-primary" disabled={syncStatus.state === 'saving'}>
               <Save size={16} aria-hidden="true" />
-              <span>{syncStatus.state === 'saving' ? 'Saving...' : 'Save production entry'}</span>
+              <span>{syncStatus.state === 'saving' ? 'Saving...' : 'Save Hourly Production'}</span>
             </button>
           </div>
         </form>
       </section>
 
-      {/* Shift 8-Hour Matrix */}
-      <section className="surface-card" aria-labelledby="matrix-heading">
+      {/* Shift 8-Hour Multi-Part Matrix */}
+      <section className="surface-card" aria-labelledby="nc-matrix-heading">
         <div className="section-header">
           <div>
-            <h2 id="matrix-heading" className="section-title">
+            <h2 id="nc-matrix-heading" className="section-title" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <Layers size={16} style={{ color: 'var(--accent)' }} />
               {selectedMachine} — {selectedShift} Hourly Log ({selectedDate})
             </h2>
+            <p className="section-subtitle">Click any hour row to load or update multi-part entries.</p>
           </div>
         </div>
 
@@ -470,19 +714,19 @@ export default function HourlyEntryView({
             <thead>
               <tr>
                 <th>Hour</th>
-                <th>Tool</th>
+                <th>Parts &amp; Tools</th>
                 <th>Operator</th>
-                <th>Target</th>
-                <th>Actual</th>
+                <th>Combined Target</th>
+                <th>Combined Actual</th>
+                <th>Ach %</th>
                 <th>Scrap</th>
                 <th>Downtime</th>
-                <th>Entry Time</th>
               </tr>
             </thead>
             <tbody>
               {HOUR_SLOTS.map((slot) => {
-                const rec = machineRecords.find(
-                  (r) => r.hour_interval === slot.label || String(r.hour_interval || '').includes(slot.key)
+                const grp = machineHourlyGroups.find(
+                  (g) => g.hour_interval === slot.label || String(g.hour_interval || '').includes(slot.key)
                 );
                 return (
                   <tr
@@ -491,13 +735,26 @@ export default function HourlyEntryView({
                     style={{ cursor: 'pointer', background: selectedHour === slot.label ? 'var(--accent-tint)' : undefined }}
                   >
                     <td><strong>{slot.label}</strong></td>
-                    <td className="mono">{rec?.tool_number || '—'}</td>
-                    <td>{rec?.operator_name || '—'}</td>
-                    <td className="tabular">{rec ? `${rec.target_qty} pcs` : '—'}</td>
-                    <td className="tabular"><strong>{rec ? `${rec.actual_qty} pcs` : '—'}</strong></td>
-                    <td className="tabular">{rec ? rec.rejected_qty : '—'}</td>
-                    <td className="tabular">{rec ? `${rec.downtime_minutes}m` : '—'}</td>
-                    <td className="tabular">{rec?.entry_time || '—'}</td>
+                    <td>
+                      {!grp ? (
+                        '—'
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          {grp.parts.map((pt, idx) => (
+                            <div key={pt.id || idx} style={{ fontSize: '0.78rem' }}>
+                              <span className="mono" style={{ fontWeight: 700 }}>P{pt.part_index}: {pt.tool_number}</span>{' '}
+                              <span className="tabular">({pt.actual_qty}/{pt.target_qty} pcs, scrap {pt.rejected_qty})</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td>{grp ? grp.operators.join(', ') || '—' : '—'}</td>
+                    <td className="tabular">{grp ? `${grp.totalTarget.toLocaleString()} pcs` : '—'}</td>
+                    <td className="tabular"><strong>{grp ? `${grp.totalActual.toLocaleString()} pcs` : '—'}</strong></td>
+                    <td className="tabular">{grp && grp.totalTarget > 0 ? `${grp.achievementPct}%` : '—'}</td>
+                    <td className="tabular">{grp ? grp.totalScrap : '—'}</td>
+                    <td className="tabular">{grp ? `${grp.downtimeMinutes}m` : '—'}</td>
                   </tr>
                 );
               })}
@@ -507,8 +764,8 @@ export default function HourlyEntryView({
 
         <div className="mobile-card-list">
           {HOUR_SLOTS.map((slot) => {
-            const rec = machineRecords.find(
-              (r) => r.hour_interval === slot.label || String(r.hour_interval || '').includes(slot.key)
+            const grp = machineHourlyGroups.find(
+              (g) => g.hour_interval === slot.label || String(g.hour_interval || '').includes(slot.key)
             );
             return (
               <button
@@ -527,12 +784,12 @@ export default function HourlyEntryView({
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <strong>{slot.label}</strong>
                   <span className="tabular" style={{ fontWeight: 700 }}>
-                    {rec ? `${rec.actual_qty} / ${rec.target_qty} pcs` : 'Not logged'}
+                    {grp ? `${grp.totalActual.toLocaleString()} / ${grp.totalTarget.toLocaleString()} pcs` : 'Not logged'}
                   </span>
                 </div>
-                {rec && (
+                {grp && (
                   <div style={{ fontSize: '0.78rem', color: 'var(--ink-muted)', marginTop: 4 }}>
-                    Tool: {rec.tool_number} • Operator: {rec.operator_name} • DT: {rec.downtime_minutes}m
+                    {grp.parts.length} part(s): {grp.tools.join(', ')} • Scrap: {grp.totalScrap} • DT: {grp.downtimeMinutes}m
                   </div>
                 )}
               </button>

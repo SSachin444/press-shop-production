@@ -309,6 +309,14 @@ export default function SettingsView({ currentUser, onOpenChangePassword }) {
             <span>{diagResult.detail}</span>
           </div>
         )}
+
+        {cloudApi.getSchemaSyncStatus().needsMigration && (
+          <div className="banner is-warn" style={{ marginTop: 12 }}>
+            <span>
+              Database schema upgrade available: run <code>supabase/migrations/202611260001_industrial_upgrade.sql</code> in Supabase SQL Editor to enable native relational <code>tools</code>, <code>scrap_entries</code>, and <code>part_index</code> multi-part columns. Fallback cloud sync is currently protecting all operations.
+            </span>
+          </div>
+        )}
       </section>
     </div>
   );

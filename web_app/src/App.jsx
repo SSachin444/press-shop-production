@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ROLES,
   canAccessTab,
@@ -11,6 +11,7 @@ import { purgeLegacyLocalStorage } from './services/authSession';
 import { cloudApi } from './services/cloudClient';
 import { flushSyncQueue, getSyncQueue } from './services/syncQueue';
 
+import MechanicalPressBackground from './components/MechanicalPressBackground';
 import RoleGateway from './components/RoleGateway';
 import PasswordModal from './components/PasswordModal';
 import NotificationModal from './components/NotificationModal';
@@ -18,7 +19,10 @@ import AppShell from './components/AppShell';
 import DashboardView from './components/DashboardView';
 import LiveCellStatusView from './components/LiveCellStatusView';
 import HourlyEntryView from './components/HourlyEntryView';
+import TandemProductionView from './components/TandemProductionView';
 import ProductionOverviewView from './components/ProductionOverviewView';
+import ToolsView from './components/ToolsView';
+import ProductionSummaryView from './components/ProductionSummaryView';
 import MachinesView from './components/MachinesView';
 import ReportsView from './components/ReportsView';
 import EmployeesView from './components/EmployeesView';
@@ -50,10 +54,12 @@ export default function App() {
 
   // Core cloud state
   const [machines, setMachines] = useState([]);
+  const [tools, setTools] = useState([]);
   const [records, setRecords] = useState([]);
   const [reportRecords, setReportRecords] = useState(null);
   const [downtimes, setDowntimes] = useState([]);
   const [downtimeCodes, setDowntimeCodes] = useState([]);
+  const [employeesCount, setEmployeesCount] = useState(0);
   const [dataState, setDataState] = useState('loading'); // loading | ready | error
   const [errorMessage, setErrorMessage] = useState('');
   const [lastSyncedAt, setLastSyncedAt] = useState('');
@@ -61,6 +67,9 @@ export default function App() {
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [pendingSyncCount, setPendingSyncCount] = useState(() => getSyncQueue().length);
+
+  // Prevents overlapping 5-second background refresh requests
+  const syncInFlightRef = useRef(false);
 
   // Modals & Alerts
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
@@ -139,30 +148,40 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, [currentUser?.role, navigateToTab]);
 
-  // Core data loader
+  // Core data loader (with in-flight mutex so 5s refreshes never overlap)
   const loadOperationalData = useCallback(
     async ({ silent = false } = {}) => {
       if (!currentUser || mustChangePassword) return;
+      if (syncInFlightRef.current && silent) return;
+      syncInFlightRef.current = true;
       if (!silent) {
         setDataState((prev) => (prev === 'ready' ? 'ready' : 'loading'));
       }
       setErrorMessage('');
       try {
-        const [mList, rList, dtList, codesList] = await Promise.all([
+        const [mList, rList, dtList, codesList, toolList, rosterList] = await Promise.all([
           cloudApi.getMachines(),
           cloudApi.getProductionRecords({ date: selectedDate }),
           cloudApi.getMachineDowntime(),
           cloudApi.getDowntimeCodes(),
+          cloudApi.getTools().catch(() => []),
+          cloudApi.getOperationalRoster().catch(() => []),
         ]);
         setMachines(mList || []);
         setRecords(rList || []);
         setDowntimes(dtList || []);
         setDowntimeCodes(codesList || []);
+        setTools(toolList || []);
+        setEmployeesCount((rosterList || []).length);
         setDataState('ready');
         setLastSyncedAt(new Date().toISOString());
       } catch (err) {
-        setDataState('error');
-        setErrorMessage(err?.message || 'Unable to synchronize shopfloor data from cloud backend.');
+        if (!silent) {
+          setDataState('error');
+          setErrorMessage(err?.message || 'Unable to synchronize shopfloor data from cloud backend.');
+        }
+      } finally {
+        syncInFlightRef.current = false;
       }
     },
     [currentUser, mustChangePassword, selectedDate]
@@ -177,7 +196,7 @@ export default function App() {
         const allRecs = await cloudApi.getProductionRecords({});
         if (mounted) setReportRecords(allRecs || []);
       } catch {
-        // Fallback to currently loaded date records if full scan is unavailable
+        // Keep date records
       }
     })();
     return () => {
@@ -189,19 +208,29 @@ export default function App() {
     loadOperationalData();
   }, [loadOperationalData]);
 
-  // Cloud Realtime Subscription + Periodic Freshness Refresh
+  // Cloud Realtime Subscription + Mandatory 5-Second Live Auto-Refresh
   useEffect(() => {
     if (!currentUser || mustChangePassword) return undefined;
     const unsubscribe = cloudApi.subscribeToChanges(() => {
       loadOperationalData({ silent: true });
     });
-    const pollMs = currentUser.role === ROLES.DASHBOARD ? 15000 : 45000;
+
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       loadOperationalData({ silent: true });
-    }, pollMs);
+    }, 5000);
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        loadOperationalData({ silent: true });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     return () => {
       if (typeof unsubscribe === 'function') unsubscribe();
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [currentUser, mustChangePassword, loadOperationalData]);
 
@@ -282,6 +311,7 @@ export default function App() {
     await cloudApi.signOut();
     setSession(null);
     setMachines([]);
+    setTools([]);
     setRecords([]);
     setReportRecords(null);
     setRouteNotice('');
@@ -290,68 +320,85 @@ export default function App() {
 
   if (booting) {
     return (
-      <div className="gateway-page">
-        <div className="gateway-card" style={{ maxWidth: 420, textAlign: 'center' }}>
-          <div className="skeleton-line" style={{ height: 22, width: '60%', margin: '0 auto 12px' }} />
-          <div className="skeleton-line" style={{ height: 14, width: '80%', margin: '0 auto' }} />
+      <>
+        <MechanicalPressBackground />
+        <div className="gateway-page app-foreground">
+          <div className="gateway-card" style={{ maxWidth: 420, textAlign: 'center' }}>
+            <div className="skeleton-line" style={{ height: 22, width: '60%', margin: '0 auto 12px' }} />
+            <div className="skeleton-line" style={{ height: 14, width: '80%', margin: '0 auto' }} />
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
   if (!currentUser) {
-    return <RoleGateway onAuthenticated={handleAuthenticated} />;
+    return (
+      <>
+        <MechanicalPressBackground />
+        <div className="app-foreground">
+          <RoleGateway onAuthenticated={handleAuthenticated} />
+        </div>
+      </>
+    );
   }
 
-  // Enforce strong replacement before granting workspace access when temp password is active
   if (mustChangePassword) {
     return (
-      <div className="gateway-page">
-        <div className="gateway-card" style={{ maxWidth: 520 }}>
-          <div className="banner is-warn" style={{ marginBottom: 16 }}>
-            <span>
-              Security policy: your account is using an initial temporary password and must be replaced before entering the workspace.
-            </span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <strong>{currentUser.full_name || currentUser.username}</strong> ({currentUser.role})
+      <>
+        <MechanicalPressBackground />
+        <div className="gateway-page app-foreground">
+          <div className="gateway-card" style={{ maxWidth: 520 }}>
+            <div className="banner is-warn" style={{ marginBottom: 16 }}>
+              <span>
+                Security policy: your account is using an initial temporary password and must be replaced before entering the workspace.
+              </span>
             </div>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={handleSignOut}>
-              Sign Out
-            </button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <strong>{currentUser.full_name || currentUser.username}</strong> ({currentUser.role})
+              </div>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={handleSignOut}>
+                Sign Out
+              </button>
+            </div>
           </div>
+          <PasswordModal
+            isOpen={true}
+            forced={true}
+            onCompleted={() => {
+              setSession((prev) =>
+                prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+              );
+            }}
+          />
         </div>
-        <PasswordModal
-          isOpen={true}
-          forced={true}
-          onCompleted={() => {
-            setSession((prev) =>
-              prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
-            );
-          }}
-        />
-      </div>
+      </>
     );
   }
 
   // Full-screen Read-Only Shopfloor Monitor for Dashboard role
   if (currentUser.role === ROLES.DASHBOARD) {
     return (
-      <LiveCellStatusView
-        kioskMode={true}
-        selectedPlant={selectedPlant}
-        selectedDate={selectedDate}
-        selectedShift={selectedShift}
-        machines={machines}
-        records={records}
-        downtimes={downtimes}
-        dataState={dataState}
-        lastSyncedAt={lastSyncedAt}
-        isOnline={isOnline}
-        onRefresh={() => loadOperationalData()}
-        onExitKiosk={handleSignOut}
-      />
+      <>
+        <MechanicalPressBackground />
+        <div className="app-foreground">
+          <LiveCellStatusView
+            kioskMode={true}
+            selectedPlant={selectedPlant}
+            selectedDate={selectedDate}
+            selectedShift={selectedShift}
+            machines={machines}
+            records={records}
+            downtimes={downtimes}
+            dataState={dataState}
+            lastSyncedAt={lastSyncedAt}
+            isOnline={isOnline}
+            onRefresh={() => loadOperationalData()}
+            onExitKiosk={handleSignOut}
+          />
+        </div>
+      </>
     );
   }
 
@@ -379,6 +426,7 @@ export default function App() {
             machines={machines}
             records={records}
             downtimes={downtimes}
+            employeesCount={employeesCount}
             dataState={dataState}
             errorMessage={errorMessage}
             lastSyncedAt={lastSyncedAt}
@@ -396,6 +444,7 @@ export default function App() {
             selectedShift={selectedShift}
             setSelectedShift={setSelectedShift}
             machines={machines}
+            tools={tools}
             records={records}
             downtimeCodes={downtimeCodes}
             currentUser={currentUser}
@@ -403,6 +452,47 @@ export default function App() {
               setPendingSyncCount(getSyncQueue().length);
               loadOperationalData({ silent: true });
             }}
+          />
+        );
+      case 'tandem-production':
+        return (
+          <TandemProductionView
+            selectedPlant={selectedPlant}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            selectedShift={selectedShift}
+            setSelectedShift={setSelectedShift}
+            machines={machines}
+            tools={tools}
+            records={records}
+            downtimes={downtimes}
+            downtimeCodes={downtimeCodes}
+            currentUser={currentUser}
+            onEntrySaved={() => {
+              setPendingSyncCount(getSyncQueue().length);
+              loadOperationalData({ silent: true });
+            }}
+          />
+        );
+      case 'tools':
+        return (
+          <ToolsView
+            tools={tools}
+            machines={machines}
+            records={records}
+            currentUser={currentUser}
+            onReload={() => loadOperationalData({ silent: true })}
+          />
+        );
+      case 'production-summary':
+        return (
+          <ProductionSummaryView
+            selectedDate={selectedDate}
+            selectedShift={selectedShift}
+            machines={machines}
+            tools={tools}
+            records={records}
+            downtimes={downtimes}
           />
         );
       case 'cell-status':
@@ -504,49 +594,52 @@ export default function App() {
 
   return (
     <>
-      <AppShell
-        activeTab={activeTab}
-        onSelectTab={navigateToTab}
-        currentUser={currentUser}
-        selectedPlant={selectedPlant}
-        selectedDate={selectedDate}
-        selectedShift={selectedShift}
-        isOnline={isOnline}
-        pendingSyncCount={pendingSyncCount}
-        onRetryPendingSync={handleFlushPendingQueue}
-        notifications={notifications}
-        onOpenNotifications={() => setNotificationsOpen(true)}
-        onOpenChangePassword={() => setPasswordModalOpen(true)}
-        onSignOut={handleSignOut}
-      >
-        {routeNotice && (
-          <div className="banner is-warn" style={{ marginBottom: 14 }}>
-            <span>{routeNotice}</span>
-          </div>
-        )}
-        {renderActiveView()}
-      </AppShell>
+      <MechanicalPressBackground />
+      <div className="app-foreground">
+        <AppShell
+          activeTab={activeTab}
+          onSelectTab={navigateToTab}
+          currentUser={currentUser}
+          selectedPlant={selectedPlant}
+          selectedDate={selectedDate}
+          selectedShift={selectedShift}
+          isOnline={isOnline}
+          pendingSyncCount={pendingSyncCount}
+          onRetryPendingSync={handleFlushPendingQueue}
+          notifications={notifications}
+          onOpenNotifications={() => setNotificationsOpen(true)}
+          onOpenChangePassword={() => setPasswordModalOpen(true)}
+          onSignOut={handleSignOut}
+        >
+          {routeNotice && (
+            <div className="banner is-warn" style={{ marginBottom: 14 }}>
+              <span>{routeNotice}</span>
+            </div>
+          )}
+          {renderActiveView()}
+        </AppShell>
 
-      <PasswordModal
-        isOpen={passwordModalOpen}
-        forced={false}
-        onClose={() => setPasswordModalOpen(false)}
-        onCompleted={() => {
-          setSession((prev) =>
-            prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
-          );
-        }}
-      />
+        <PasswordModal
+          isOpen={passwordModalOpen}
+          forced={false}
+          onClose={() => setPasswordModalOpen(false)}
+          onCompleted={() => {
+            setSession((prev) =>
+              prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+            );
+          }}
+        />
 
-      <NotificationModal
-        isOpen={notificationsOpen}
-        onClose={() => setNotificationsOpen(false)}
-        notifications={notifications}
-        onDismiss={(id) => setDismissedNotifications((prev) => [...prev, id])}
-        onClearAll={() =>
-          setDismissedNotifications((prev) => [...prev, ...notifications.map((n) => n.id)])
-        }
-      />
+        <NotificationModal
+          isOpen={notificationsOpen}
+          onClose={() => setNotificationsOpen(false)}
+          notifications={notifications}
+          onDismiss={(id) => setDismissedNotifications((prev) => [...prev, id])}
+          onClearAll={() =>
+            setDismissedNotifications((prev) => [...prev, ...notifications.map((n) => n.id)])
+          }
+        />
+      </div>
     </>
   );
 }

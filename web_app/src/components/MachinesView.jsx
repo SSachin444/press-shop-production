@@ -1,7 +1,10 @@
-import React, { useState, useMemo } from 'react';
-import { Plus, Edit3, AlertCircle, CheckCircle2, X, Search } from 'lucide-react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Plus, Edit3, Trash2, AlertCircle, CheckCircle2, X, Search, ShieldAlert, Settings2 } from 'lucide-react';
 import { getCapabilities } from '../config/roles';
 import { cloudApi } from '../services/cloudClient';
+import { DEFAULT_DOWNTIME_CODES } from '../services/metrics';
+
+const STATUS_OPTIONS = ['Running', 'Idle', 'Maintenance', 'Breakdown'];
 
 export default function MachinesView({
   machines,
@@ -12,6 +15,7 @@ export default function MachinesView({
 }) {
   const caps = getCapabilities(currentUser?.role);
   const [groupFilter, setGroupFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
   const [search, setSearch] = useState('');
   const [subTab, setSubTab] = useState('directory'); // 'directory' | 'downtime' | 'codes'
   const [notice, setNotice] = useState(null);
@@ -32,23 +36,48 @@ export default function MachinesView({
     version: 1,
   });
 
-  // Downtime Codes State (Admin only)
-  const [codesDraft, setCodesDraft] = useState(() => downtimeCodes || []);
+  // Safe Delete Confirmation State
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  // Downtime Codes State (Admin only, up to 10 options)
+  const [codesDraft, setCodesDraft] = useState(() =>
+    downtimeCodes && downtimeCodes.length > 0 ? downtimeCodes : DEFAULT_DOWNTIME_CODES
+  );
+
+  useEffect(() => {
+    if (downtimeCodes && downtimeCodes.length > 0) {
+      setCodesDraft(downtimeCodes);
+    }
+  }, [downtimeCodes]);
 
   const filteredMachines = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (machines || []).filter((m) => {
       if (groupFilter !== 'ALL' && m.machine_type !== groupFilter) return false;
+      if (statusFilter !== 'ALL' && (m.status || 'Idle') !== statusFilter) return false;
       if (q) {
         return (
           String(m.machine_number).toLowerCase().includes(q) ||
+          String(m.machine_type || '').toLowerCase().includes(q) ||
           String(m.assigned_operator || '').toLowerCase().includes(q) ||
-          String(m.status || '').toLowerCase().includes(q)
+          String(m.status || '').toLowerCase().includes(q) ||
+          String(m.maintenance_notes || '').toLowerCase().includes(q)
         );
       }
       return true;
     });
-  }, [machines, groupFilter, search]);
+  }, [machines, groupFilter, statusFilter, search]);
+
+  const statusCounts = useMemo(() => {
+    const counts = { Running: 0, Idle: 0, Maintenance: 0, Breakdown: 0 };
+    (machines || []).forEach((m) => {
+      const s = m.status || 'Idle';
+      if (counts[s] !== undefined) counts[s] += 1;
+    });
+    return counts;
+  }, [machines]);
 
   const openEditModal = (m) => {
     if (!caps.canEditMachines) return;
@@ -85,7 +114,7 @@ export default function MachinesView({
   };
 
   const validateMachineForm = () => {
-    if (!form.machine_number.trim()) return 'Machine name/number is required.';
+    if (!form.machine_number.trim()) return 'Machine number is required.';
     const t = Number(form.tonnage);
     const tgt = Number(form.production_target);
     if (!Number.isFinite(t) || t < 0 || t > 20000) return 'Tonnage must be between 0 and 20,000.';
@@ -138,12 +167,64 @@ export default function MachinesView({
     }
   };
 
+  const openDeleteDialog = (m) => {
+    if (!caps.canDeleteMachines) return;
+    setDeleteTarget(m);
+    setDeleteConfirmText('');
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || !caps.canDeleteMachines) return;
+    const expected = String(deleteTarget.machine_number || '').trim().toUpperCase();
+    if (deleteConfirmText.trim().toUpperCase() !== expected) {
+      setNotice({ type: 'err', message: `Type "${expected}" exactly to confirm deletion.` });
+      return;
+    }
+    try {
+      setDeleting(true);
+      const res = await cloudApi.deleteMachine(expected);
+      setNotice({
+        type: 'ok',
+        message: `Machine ${expected} removed from directory. ${res.preservedHistoryCount || 0} historical production record(s) preserved safely.`,
+      });
+      setDeleteTarget(null);
+      setDeleteConfirmText('');
+      if (onReload) onReload();
+    } catch (e) {
+      setNotice({ type: 'err', message: e.message || 'Unable to delete machine.' });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleAddDowntimeCode = () => {
+    if (codesDraft.length >= 10) return;
+    const nextNum = codesDraft.length + 1;
+    const code = `D${String(nextNum).padStart(2, '0')}`;
+    const exists = new Set(codesDraft.map((c) => c.code));
+    let candidate = code;
+    let i = nextNum;
+    while (exists.has(candidate) && i <= 99) {
+      i += 1;
+      candidate = `D${String(i).padStart(2, '0')}`;
+    }
+    setCodesDraft((prev) => [
+      ...prev,
+      { code: candidate, name: '', description: '', display_order: prev.length + 1, is_active: true },
+    ]);
+  };
+
+  const handleRemoveDowntimeCode = (idx) => {
+    if (codesDraft.length <= 1) return;
+    setCodesDraft((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleSaveCodes = async () => {
     if (!caps.canManageDowntimeCodes) return;
     try {
       setSaving(true);
       await cloudApi.saveDowntimeCodes(codesDraft);
-      setNotice({ type: 'ok', message: 'Downtime codes updated.' });
+      setNotice({ type: 'ok', message: `Saved ${codesDraft.length} configurable downtime reason option(s).` });
       if (onReload) onReload();
     } catch (e) {
       setNotice({ type: 'err', message: e.message || 'Unable to update downtime codes.' });
@@ -166,13 +247,41 @@ export default function MachinesView({
         </div>
       )}
 
+      {/* Fleet Status Summary Strip */}
+      <div className="kpi-grid-4">
+        <div className="kpi-box" onClick={() => setStatusFilter('ALL')}>
+          <span className="kpi-label">Total Machines</span>
+          <div className="kpi-number tabular">{machines.length}</div>
+          <span className="kpi-comparison">
+            NC: {machines.filter((m) => m.machine_type === 'NC').length} • Tandem: {machines.filter((m) => m.machine_type === 'Tandem').length}
+          </span>
+        </div>
+        <div className="kpi-box is-green-accent" onClick={() => setStatusFilter(statusFilter === 'Running' ? 'ALL' : 'Running')}>
+          <span className="kpi-label">Running</span>
+          <div className="kpi-number tabular" style={{ color: 'var(--status-ok)' }}>{statusCounts.Running}</div>
+          <span className="kpi-comparison">Click to filter Running</span>
+        </div>
+        <div className="kpi-box is-orange-accent" onClick={() => setStatusFilter(statusFilter === 'Idle' ? 'ALL' : 'Idle')}>
+          <span className="kpi-label">Idle / Maintenance</span>
+          <div className="kpi-number tabular" style={{ color: 'var(--accent)' }}>{statusCounts.Idle + statusCounts.Maintenance}</div>
+          <span className="kpi-comparison">Idle: {statusCounts.Idle} • Maint: {statusCounts.Maintenance}</span>
+        </div>
+        <div className="kpi-box" onClick={() => setStatusFilter(statusFilter === 'Breakdown' ? 'ALL' : 'Breakdown')}>
+          <span className="kpi-label">Breakdown</span>
+          <div className="kpi-number tabular" style={{ color: statusCounts.Breakdown > 0 ? 'var(--status-err)' : 'var(--ink-primary)' }}>
+            {statusCounts.Breakdown}
+          </div>
+          <span className="kpi-comparison">Open downtimes: {downtimes.filter((d) => d.status === 'Open').length}</span>
+        </div>
+      </div>
+
       <section className="surface-card">
         <div className="section-header">
           <div>
             <h2 className="section-title">Machine Directory &amp; Configuration</h2>
             <p className="section-subtitle">
               {caps.canEditMachines
-                ? 'Admin mode: edits require confirmation, enforce version conflict checks, and write to the audit log.'
+                ? 'Admin mode: add, edit, or safely remove machines while preserving all historical production records.'
                 : 'View-only mode: machine configuration changes are restricted to Admin.'}
             </p>
           </div>
@@ -184,12 +293,20 @@ export default function MachinesView({
               Downtime Log ({downtimes.length})
             </button>
             {caps.canManageDowntimeCodes && (
-              <button type="button" className={`btn btn-sm ${subTab === 'codes' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setCodesDraft(downtimeCodes); setSubTab('codes'); }}>
-                Downtime Codes
+              <button
+                type="button"
+                className={`btn btn-sm ${subTab === 'codes' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => {
+                  setCodesDraft(downtimeCodes && downtimeCodes.length > 0 ? downtimeCodes : DEFAULT_DOWNTIME_CODES);
+                  setSubTab('codes');
+                }}
+              >
+                <Settings2 size={14} aria-hidden="true" />
+                <span>Downtime Reasons ({(downtimeCodes || []).length}/10)</span>
               </button>
             )}
             {caps.canEditMachines && subTab === 'directory' && (
-              <button type="button" className="btn btn-navy btn-sm" onClick={openAddModal}>
+              <button type="button" className="btn btn-green btn-sm" onClick={openAddModal}>
                 <Plus size={14} aria-hidden="true" />
                 <span>Add Machine</span>
               </button>
@@ -199,18 +316,34 @@ export default function MachinesView({
 
         {subTab === 'directory' && (
           <>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-              {['ALL', 'NC', 'Tandem'].map((g) => (
-                <button
-                  key={g}
-                  type="button"
-                  className={`btn btn-sm ${groupFilter === g ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setGroupFilter(g)}
-                >
-                  {g === 'ALL' ? 'All Groups' : g}
-                </button>
-              ))}
-              <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {['ALL', 'NC', 'Tandem'].map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    className={`btn btn-sm ${groupFilter === g ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setGroupFilter(g)}
+                  >
+                    {g === 'ALL' ? 'All Types' : g}
+                  </button>
+                ))}
+              </div>
+
+              <select
+                className="field-select"
+                style={{ width: 170 }}
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                aria-label="Filter by machine status"
+              >
+                <option value="ALL">All Statuses</option>
+                {STATUS_OPTIONS.map((st) => (
+                  <option key={st} value={st}>{st}</option>
+                ))}
+              </select>
+
+              <div style={{ position: 'relative', flex: 1, minWidth: 210 }}>
                 <Search size={14} style={{ position: 'absolute', left: 10, top: 13, color: 'var(--ink-muted)' }} aria-hidden="true" />
                 <input
                   type="text"
@@ -218,7 +351,7 @@ export default function MachinesView({
                   style={{ paddingLeft: 30 }}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search machine, operator, status..."
+                  placeholder="Search machine number, type, operator, status..."
                   aria-label="Search machines"
                 />
               </div>
@@ -228,41 +361,69 @@ export default function MachinesView({
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Machine</th>
-                    <th>Group</th>
+                    <th>Machine #</th>
+                    <th>Type</th>
                     <th>Tonnage</th>
                     <th>Shift Target</th>
-                    <th>State</th>
-                    <th>Operator</th>
+                    <th>Status</th>
+                    <th>Assigned Operator</th>
+                    <th>Notes</th>
                     <th>Last Update</th>
-                    {caps.canEditMachines && <th>Action</th>}
+                    {caps.canEditMachines && <th>Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredMachines.map((m) => {
-                    const pill = m.status === 'Running' ? 'is-ok' : m.status === 'Breakdown' ? 'is-err' : 'is-warn';
-                    return (
-                      <tr key={m.machine_number}>
-                        <td><strong>{m.machine_number}</strong></td>
-                        <td>{m.machine_type}</td>
-                        <td className="tabular">{m.tonnage} T</td>
-                        <td className="tabular">{m.production_target} pcs</td>
-                        <td><span className={`status-pill ${pill}`}>{m.status || 'Idle'}</span></td>
-                        <td>{m.assigned_operator || '—'}</td>
-                        <td className="tabular" style={{ fontSize: '0.76rem', color: 'var(--ink-muted)' }}>
-                          {m.updated_at ? new Date(m.updated_at).toLocaleString() : '—'}
-                        </td>
-                        {caps.canEditMachines && (
+                  {filteredMachines.length === 0 ? (
+                    <tr>
+                      <td colSpan={caps.canEditMachines ? 9 : 8} style={{ textAlign: 'center', color: 'var(--ink-muted)', padding: 24 }}>
+                        No machines match your current search or filter criteria.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredMachines.map((m) => {
+                      const pill =
+                        m.status === 'Running' ? 'is-ok' : m.status === 'Breakdown' ? 'is-err' : 'is-warn';
+                      return (
+                        <tr key={m.machine_number}>
+                          <td><strong className="mono">{m.machine_number}</strong></td>
                           <td>
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => openEditModal(m)}>
-                              <Edit3 size={14} aria-hidden="true" />
-                              <span>Configure</span>
-                            </button>
+                            <span className={`status-pill ${m.machine_type === 'Tandem' ? 'is-orange' : ''}`}>
+                              {m.machine_type}
+                            </span>
                           </td>
-                        )}
-                      </tr>
-                    );
-                  })}
+                          <td className="tabular">{m.tonnage} T</td>
+                          <td className="tabular">{Number(m.production_target || 0).toLocaleString()} pcs</td>
+                          <td><span className={`status-pill ${pill}`}>{m.status || 'Idle'}</span></td>
+                          <td>{m.assigned_operator || '—'}</td>
+                          <td style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--ink-secondary)' }}>
+                            {m.maintenance_notes || '—'}
+                          </td>
+                          <td className="tabular" style={{ fontSize: '0.76rem', color: 'var(--ink-muted)' }}>
+                            {m.updated_at ? new Date(m.updated_at).toLocaleString() : '—'}
+                          </td>
+                          {caps.canEditMachines && (
+                            <td>
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => openEditModal(m)}>
+                                  <Edit3 size={14} aria-hidden="true" />
+                                  <span>Edit</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-danger btn-sm"
+                                  onClick={() => openDeleteDialog(m)}
+                                  aria-label={`Delete machine ${m.machine_number}`}
+                                >
+                                  <Trash2 size={14} aria-hidden="true" />
+                                  <span>Delete</span>
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>
@@ -271,19 +432,28 @@ export default function MachinesView({
               {filteredMachines.map((m) => {
                 const pill = m.status === 'Running' ? 'is-ok' : m.status === 'Breakdown' ? 'is-err' : 'is-warn';
                 return (
-                  <div key={m.machine_number} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
+                  <div key={m.machine_number} className="mobile-entity-card">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <strong>{m.machine_number} • {m.machine_type} ({m.tonnage}T)</strong>
+                      <strong className="mono">{m.machine_number} • {m.machine_type} ({m.tonnage}T)</strong>
                       <span className={`status-pill ${pill}`}>{m.status || 'Idle'}</span>
                     </div>
                     <div style={{ fontSize: '0.8rem', color: 'var(--ink-secondary)' }}>
-                      Target: {m.production_target} pcs • Operator: {m.assigned_operator || '—'}
+                      Target: {Number(m.production_target || 0).toLocaleString()} pcs • Operator: {m.assigned_operator || '—'}
                     </div>
+                    {m.maintenance_notes && (
+                      <div style={{ fontSize: '0.76rem', color: 'var(--ink-muted)', marginTop: 4 }}>
+                        Notes: {m.maintenance_notes}
+                      </div>
+                    )}
                     {caps.canEditMachines && (
-                      <div style={{ marginTop: 10 }}>
+                      <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
                         <button type="button" className="btn btn-secondary btn-sm" onClick={() => openEditModal(m)}>
                           <Edit3 size={14} />
-                          <span>Configure</span>
+                          <span>Edit</span>
+                        </button>
+                        <button type="button" className="btn btn-danger btn-sm" onClick={() => openDeleteDialog(m)}>
+                          <Trash2 size={14} />
+                          <span>Delete</span>
                         </button>
                       </div>
                     )}
@@ -299,27 +469,36 @@ export default function MachinesView({
             <table className="data-table">
               <thead>
                 <tr>
+                  <th>Date &amp; Shift</th>
                   <th>Code</th>
                   <th>Machine</th>
-                  <th>Reason</th>
-                  <th>Operator</th>
+                  <th>Start – End</th>
                   <th>Duration</th>
+                  <th>Reason &amp; Problem</th>
+                  <th>Operator</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {downtimes.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>No downtime records found.</td>
+                    <td colSpan={8} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>No downtime records found.</td>
                   </tr>
                 ) : (
                   downtimes.map((d) => (
                     <tr key={d.id}>
+                      <td className="tabular">{d.date || '—'} • {d.shift || '—'}</td>
                       <td className="mono">{d.downtime_code || 'D01'}</td>
                       <td><strong>{d.machine_number}</strong></td>
-                      <td>{d.reason || d.breakdown_reason}</td>
-                      <td>{d.operator_name || '—'}</td>
+                      <td className="tabular">{d.start_time && d.end_time ? `${d.start_time} – ${d.end_time}` : d.start_time || '—'}</td>
                       <td className="tabular">{d.duration_minutes || d.total_downtime_minutes || 0} min</td>
+                      <td>
+                        <div><strong>{d.reason || d.breakdown_reason}</strong></div>
+                        {d.problem_description && (
+                          <div style={{ fontSize: '0.76rem', color: 'var(--ink-muted)' }}>{d.problem_description}</div>
+                        )}
+                      </td>
+                      <td>{d.operator_name || '—'}</td>
                       <td><span className={`status-pill ${d.status === 'Open' ? 'is-err' : 'is-ok'}`}>{d.status}</span></td>
                     </tr>
                   ))
@@ -331,16 +510,69 @@ export default function MachinesView({
 
         {subTab === 'codes' && caps.canManageDowntimeCodes && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+              <p className="section-subtitle">
+                Configure up to 10 standardized downtime reason options used across NC and Tandem hourly production entries.
+              </p>
+              <button
+                type="button"
+                className="btn btn-green btn-sm"
+                onClick={handleAddDowntimeCode}
+                disabled={codesDraft.length >= 10}
+              >
+                <Plus size={14} />
+                <span>Add Option ({codesDraft.length}/10)</span>
+              </button>
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-              {codesDraft.slice(0, 6).map((c, idx) => (
-                <div key={c.code} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
-                  <div className="mono" style={{ fontWeight: 700, color: 'var(--accent)', marginBottom: 8 }}>{c.code}</div>
+              {codesDraft.slice(0, 10).map((c, idx) => (
+                <div key={`${c.code}-${idx}`} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12, background: 'var(--bg-surface)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <input
+                      type="text"
+                      className="field-input mono"
+                      style={{ width: 90, fontWeight: 700, color: 'var(--accent)' }}
+                      value={c.code}
+                      aria-label={`Downtime code ${idx + 1}`}
+                      onChange={(e) =>
+                        setCodesDraft((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, code: e.target.value.toUpperCase() } : x))
+                        )
+                      }
+                    />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <label style={{ fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <input
+                          type="checkbox"
+                          checked={c.is_active !== false}
+                          onChange={(e) =>
+                            setCodesDraft((prev) =>
+                              prev.map((x, i) => (i === idx ? { ...x, is_active: e.target.checked } : x))
+                            )
+                          }
+                        />
+                        Active
+                      </label>
+                      {codesDraft.length > 1 && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => handleRemoveDowntimeCode(idx)}
+                          aria-label={`Remove downtime option ${c.code}`}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                   <div className="field-group" style={{ marginBottom: 8 }}>
-                    <label className="field-label">Reason Name</label>
+                    <label className="field-label">Reason Name *</label>
                     <input
                       type="text"
                       className="field-input"
                       value={c.name}
+                      placeholder="e.g. Die Changeover"
                       onChange={(e) => setCodesDraft((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
                     />
                   </div>
@@ -350,6 +582,7 @@ export default function MachinesView({
                       type="text"
                       className="field-input"
                       value={c.description || ''}
+                      placeholder="Details..."
                       onChange={(e) => setCodesDraft((prev) => prev.map((x, i) => (i === idx ? { ...x, description: e.target.value } : x)))}
                     />
                   </div>
@@ -358,7 +591,7 @@ export default function MachinesView({
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button type="button" className="btn btn-primary" onClick={handleSaveCodes} disabled={saving}>
-                {saving ? 'Saving...' : 'Save Downtime Codes'}
+                {saving ? 'Saving...' : 'Save Downtime Reasons'}
               </button>
             </div>
           </div>
@@ -383,17 +616,17 @@ export default function MachinesView({
                 <>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <div className="field-group">
-                      <label className="field-label" htmlFor="m-num">Machine Name / ID *</label>
+                      <label className="field-label" htmlFor="m-num">Machine Number / ID *</label>
                       <input
                         id="m-num"
                         type="text"
-                        className="field-input"
+                        className="field-input mono"
                         value={form.machine_number}
                         onChange={(e) => setForm({ ...form, machine_number: e.target.value.toUpperCase() })}
                       />
                     </div>
                     <div className="field-group">
-                      <label className="field-label" htmlFor="m-group">Group *</label>
+                      <label className="field-label" htmlFor="m-group">Machine Type *</label>
                       <select
                         id="m-group"
                         className="field-select"
@@ -437,17 +670,16 @@ export default function MachinesView({
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <div className="field-group">
-                      <label className="field-label" htmlFor="m-status">Operational State</label>
+                      <label className="field-label" htmlFor="m-status">Machine Status</label>
                       <select
                         id="m-status"
                         className="field-select"
                         value={form.status}
                         onChange={(e) => setForm({ ...form, status: e.target.value })}
                       >
-                        <option value="Running">Running</option>
-                        <option value="Idle">Idle</option>
-                        <option value="Maintenance">Maintenance</option>
-                        <option value="Breakdown">Breakdown</option>
+                        {STATUS_OPTIONS.map((st) => (
+                          <option key={st} value={st}>{st}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="field-group">
@@ -507,6 +739,61 @@ export default function MachinesView({
                   {saving ? 'Saving...' : 'Confirm & Save'}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Safe Delete Machine Confirmation Dialog */}
+      {deleteTarget && caps.canDeleteMachines && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="del-mach-title">
+          <div className="modal-dialog" style={{ maxWidth: 460 }}>
+            <div className="modal-head">
+              <h3 id="del-mach-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Confirm Machine Deletion
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteTarget(null)} aria-label="Close delete dialog">
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div className="banner is-err" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
+                <div>
+                  You are about to remove machine <strong className="mono" style={{ fontSize: '1rem' }}>{deleteTarget.machine_number}</strong> ({deleteTarget.machine_type}, {deleteTarget.tonnage}T) from the active Machine Directory.
+                </div>
+              </div>
+              <div className="banner is-ok" style={{ fontSize: '0.8rem' }}>
+                <span>
+                  Historical production records, scrap logs, and downtime history for <strong>{deleteTarget.machine_number}</strong> will NEVER be deleted and remain fully searchable in Production Summary and Reports.
+                </span>
+              </div>
+              <div className="field-group">
+                <label className="field-label" htmlFor="del-mach-confirm">
+                  Type machine number <strong className="mono">{deleteTarget.machine_number}</strong> to confirm deletion:
+                </label>
+                <input
+                  id="del-mach-confirm"
+                  type="text"
+                  className="field-input mono"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value.toUpperCase())}
+                  placeholder={deleteTarget.machine_number}
+                />
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={deleting || deleteConfirmText.trim().toUpperCase() !== String(deleteTarget.machine_number).toUpperCase()}
+                onClick={handleConfirmDelete}
+              >
+                {deleting ? 'Deleting...' : `Delete ${deleteTarget.machine_number}`}
+              </button>
             </div>
           </div>
         </div>

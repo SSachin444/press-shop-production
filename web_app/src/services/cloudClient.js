@@ -1,6 +1,5 @@
 // Unified Cloud Data & Auth Service (Supabase Cloud + Optional REST Backend)
-// Enforces explicit error propagation (never claims saved when offline or failed)
-// and reads DB configuration strictly from build-time environment variables.
+// Enforces explicit error propagation, schema-resilient multi-part sync, and safe deletions.
 
 import { createClient } from '@supabase/supabase-js';
 import { ROLES, getCapabilities } from '../config/roles';
@@ -12,7 +11,13 @@ import {
 } from './authSession';
 import {
   DEFAULT_DOWNTIME_CODES,
+  calculateTargetFromUph,
+  extractBaseHourAndPart,
   getDefaultMachinesList,
+  validateDowntimeProblems,
+  validateEmailAddress,
+  validatePhoneNumber,
+  validateScrapReasons,
 } from './metrics';
 import { enqueuePendingSubmission } from './syncQueue';
 
@@ -26,7 +31,43 @@ const SUPABASE_ANON_KEY = (
 ).trim();
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
 
+const FALLBACK_TOOLS_SETTING_KEY = 'pha_tools_catalog_fallback';
+
 let supabaseInstance = null;
+const schemaStatus = {
+  needsMigration: false,
+  missingFeatures: new Set(),
+};
+
+function markSchemaFeatureMissing(feature) {
+  schemaStatus.needsMigration = true;
+  schemaStatus.missingFeatures.add(feature);
+}
+
+export function getSchemaSyncStatus() {
+  return {
+    needsMigration: schemaStatus.needsMigration,
+    missingFeatures: Array.from(schemaStatus.missingFeatures),
+  };
+}
+
+function isMissingSchemaError(error) {
+  if (!error) return false;
+  const code = String(error.code || '');
+  const msg = String(error.message || '').toLowerCase();
+  return (
+    code === '42P01' ||
+    code === '42703' ||
+    code === '42P10' ||
+    code === 'PGRST204' ||
+    code === 'PGRST205' ||
+    msg.includes('does not exist') ||
+    msg.includes('could not find the table') ||
+    msg.includes('could not find the') ||
+    msg.includes('schema cache') ||
+    msg.includes('no unique or exclusion constraint matching')
+  );
+}
 
 export function getCloudEnvironmentInfo() {
   const mode = API_BASE_URL ? 'rest-api' : isSupabaseConfigured() ? 'supabase' : 'unconfigured';
@@ -109,6 +150,8 @@ function mapUsernameToAuthEmail(usernameOrEmail) {
 }
 
 export const cloudApi = {
+  getSchemaSyncStatus,
+
   // ------------------------------------------------------------------
   // DIAGNOSTICS (Admin Settings Only)
   // ------------------------------------------------------------------
@@ -239,12 +282,11 @@ export const cloudApi = {
     const client = getSupabaseClient();
     let token = '';
     if (client && role === ROLES.OPERATOR) {
-      // Attempt Supabase anonymous auth when enabled for RLS-authenticated operator sessions
       try {
         const { data } = await client.auth.signInAnonymously();
         token = data?.session?.access_token || '';
       } catch {
-        // Operator edge function can still validate requests when anonymous sign-in is disabled
+        // Fallback when anonymous sign-in is disabled
       }
     }
 
@@ -311,7 +353,6 @@ export const cloudApi = {
     const session = getActiveSession();
     const email = mapUsernameToAuthEmail(session.user.username);
 
-    // Re-verify current password before allowing change
     const { error: verifyErr } = await client.auth.signInWithPassword({ email, password: currentPassword });
     if (verifyErr) {
       throw new Error('Current password is incorrect.');
@@ -414,12 +455,15 @@ export const cloudApi = {
     if (!client) return () => {};
 
     const channel = client
-      .channel('pha_cloud_sync_v2')
+      .channel('pha_cloud_sync_v3')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_records' }, () => onChange('production_records'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'machines' }, () => onChange('machines'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tools' }, () => onChange('tools'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'scrap_entries' }, () => onChange('scrap_entries'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_downtime' }, () => onChange('machine_downtime'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'machine_plans' }, () => onChange('machine_plans'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'downtime_codes' }, () => onChange('downtime_codes'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' }, () => onChange('employees'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => onChange('attendance'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_handovers' }, () => onChange('shift_handovers'))
       .subscribe();
@@ -434,7 +478,7 @@ export const cloudApi = {
   },
 
   // ------------------------------------------------------------------
-  // CORE SHOPFLOOR DATA FETCHING (STRICT CLOUD READS - NO FAKE SUCCESS)
+  // MACHINES DIRECTORY (ADD, EDIT, SAFE DELETE PRESERVING HISTORY)
   // ------------------------------------------------------------------
   async getMachines(type = '') {
     if (API_BASE_URL) {
@@ -450,6 +494,348 @@ export const cloudApi = {
     return data && data.length > 0 ? data : getDefaultMachinesList();
   },
 
+  async updateMachineConfig(machineNumber, updates) {
+    assertCapability((c) => c.canEditMachines, 'Only Admin can modify machine configuration.');
+
+    if (API_BASE_URL) {
+      return await restRequest(`/api/machines/${encodeURIComponent(machineNumber)}`, {
+        method: 'PUT',
+        body: JSON.stringify(updates),
+      });
+    }
+
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    const { data: current, error: fetchErr } = await client
+      .from('machines')
+      .select('*')
+      .eq('machine_number', machineNumber)
+      .single();
+    if (fetchErr || !current) throw new Error('Machine record not found.');
+
+    if (
+      updates.version !== undefined &&
+      current.version !== undefined &&
+      Number(updates.version) !== Number(current.version)
+    ) {
+      const err = new Error('Conflict: this machine was modified by another user. Reload the latest configuration before saving.');
+      err.isConflict = true;
+      throw err;
+    }
+
+    const nextPayload = {
+      machine_number: String(updates.machine_number || current.machine_number).trim().toUpperCase(),
+      machine_type: updates.machine_type || current.machine_type,
+      tonnage: Number(updates.tonnage),
+      production_target: Number(updates.production_target),
+      status: updates.status || current.status,
+      assigned_operator: updates.assigned_operator ?? current.assigned_operator ?? '',
+      assigned_shift: updates.assigned_shift ?? current.assigned_shift ?? 'Shift A',
+      maintenance_notes: updates.maintenance_notes ?? current.maintenance_notes ?? '',
+    };
+
+    if (current.version !== undefined) {
+      nextPayload.version = Number(current.version) + 1;
+      nextPayload.updated_at = new Date().toISOString();
+      nextPayload.updated_by = getActiveSession()?.user?.username || 'admin';
+    }
+
+    const { data, error } = await client
+      .from('machines')
+      .update(nextPayload)
+      .eq('id', current.id)
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'UPDATE',
+        record_type: 'Machine',
+        details: `Updated ${machineNumber} -> ${nextPayload.machine_number} (${nextPayload.machine_type}, ${nextPayload.tonnage}T, target ${nextPayload.production_target}, status ${nextPayload.status})`,
+      });
+    } catch {
+      // Non-fatal audit log warning
+    }
+
+    return { success: true, machine: data };
+  },
+
+  async createMachine(machineData) {
+    assertCapability((c) => c.canEditMachines, 'Only Admin can register new machines.');
+    if (API_BASE_URL) {
+      return await restRequest('/api/machines', { method: 'POST', body: JSON.stringify(machineData) });
+    }
+    const client = getSupabaseClient();
+    const cleanNum = String(machineData.machine_number).trim().toUpperCase();
+    const { data, error } = await client
+      .from('machines')
+      .insert({
+        machine_number: cleanNum,
+        machine_type: machineData.machine_type || 'NC',
+        tonnage: Number(machineData.tonnage) || 0,
+        production_target: Number(machineData.production_target) || 500,
+        status: machineData.status || 'Idle',
+        assigned_operator: machineData.assigned_operator || '',
+        assigned_shift: machineData.assigned_shift || 'Shift A',
+        maintenance_notes: machineData.maintenance_notes || '',
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'CREATE',
+        record_type: 'Machine',
+        details: `Added machine ${data.machine_number} (${data.machine_type}, ${data.tonnage}T)`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return data;
+  },
+
+  async deleteMachine(machineNumber) {
+    assertCapability((c) => c.canDeleteMachines, 'Only Admin can delete machines.');
+    const cleanNum = String(machineNumber || '').trim().toUpperCase();
+    if (!cleanNum) throw new Error('Machine number is required.');
+
+    if (API_BASE_URL) {
+      return await restRequest(`/api/machines/${encodeURIComponent(cleanNum)}`, { method: 'DELETE' });
+    }
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    // Check historical production count so audit log accurately records preserved history
+    const { count: historyCount } = await client
+      .from('production_records')
+      .select('id', { count: 'exact', head: true })
+      .eq('machine_or_line', cleanNum);
+
+    // Safely detach employee assignments & queued plans without touching historical production_records or machine_downtime
+    await client.from('employees').update({ assigned_machine: '' }).eq('assigned_machine', cleanNum);
+    await client.from('machine_plans').delete().eq('machine_number', cleanNum).in('status', ['Queued', 'In Setup', 'Ready']);
+
+    const { error } = await client.from('machines').delete().eq('machine_number', cleanNum);
+    if (error) {
+      if (String(error.code) === '23503') {
+        throw new Error(`Cannot delete ${cleanNum}: active database foreign-key constraint references this machine. Run the latest schema migration first.`);
+      }
+      throw new Error(error.message);
+    }
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Machine',
+        details: `Deleted machine ${cleanNum} from directory (preserved ${historyCount || 0} historical production records)`,
+      });
+    } catch {
+      // Non-fatal
+    }
+
+    return { success: true, preservedHistoryCount: historyCount || 0 };
+  },
+
+  // ------------------------------------------------------------------
+  // TOOL MANAGEMENT DIRECTORY (PRESERVES PRODUCTION HISTORY ON DELETE)
+  // ------------------------------------------------------------------
+  async getTools() {
+    if (API_BASE_URL) {
+      const res = await restRequest('/api/tools');
+      return res.tools || [];
+    }
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    const { data, error } = await client.from('tools').select('*').order('tool_number');
+    if (!error) {
+      return data || [];
+    }
+    if (!isMissingSchemaError(error)) {
+      throw new Error(error.message);
+    }
+
+    // Fallback to app_settings catalog when migration 202611260001 has not been run yet
+    markSchemaFeatureMissing('tools_table');
+    const { data: settingRow } = await client
+      .from('app_settings')
+      .select('value')
+      .eq('key', FALLBACK_TOOLS_SETTING_KEY)
+      .maybeSingle();
+
+    let stored = [];
+    if (settingRow?.value) {
+      try {
+        stored = JSON.parse(settingRow.value);
+      } catch {
+        stored = [];
+      }
+    }
+
+    // Also include distinct historical tool numbers from production_records if not already in fallback list
+    const { data: prodTools } = await client
+      .from('production_records')
+      .select('tool_number, production_type, uph')
+      .not('tool_number', 'eq', '');
+
+    const byNum = new Map();
+    (Array.isArray(stored) ? stored : []).forEach((t) => {
+      if (t?.tool_number) byNum.set(String(t.tool_number).toUpperCase(), t);
+    });
+    (prodTools || []).forEach((pr) => {
+      const tn = String(pr.tool_number || '').trim().toUpperCase();
+      if (tn && !byNum.has(tn)) {
+        byNum.set(tn, {
+          tool_number: tn,
+          part_name: '',
+          description: '',
+          customer: '',
+          compatible_type: pr.production_type === 'Tandem' ? 'Tandem' : 'NC',
+          compatible_machines: '',
+          standard_uph: Number(pr.uph) || 0,
+          tonnage_required: 0,
+          status: 'Active',
+          is_active: true,
+          notes: '',
+        });
+      }
+    });
+
+    return Array.from(byNum.values()).sort((a, b) => a.tool_number.localeCompare(b.tool_number));
+  },
+
+  async saveTool(toolData, isEdit = false) {
+    assertCapability((c) => c.canManageTools, 'Only Admin and Supervisor can manage tools.');
+    const cleanNum = String(toolData.tool_number || '').trim().toUpperCase();
+    if (!cleanNum) throw new Error('Tool Number is required.');
+
+    const row = {
+      tool_number: cleanNum,
+      part_name: String(toolData.part_name || '').trim(),
+      description: String(toolData.description || '').trim(),
+      customer: String(toolData.customer || '').trim(),
+      compatible_type: toolData.compatible_type || 'Both',
+      compatible_machines: String(toolData.compatible_machines || '').trim(),
+      standard_uph: Number(toolData.standard_uph) || 0,
+      tonnage_required: Number(toolData.tonnage_required) || 0,
+      status: toolData.status || 'Active',
+      is_active: toolData.status !== 'Retired',
+      notes: String(toolData.notes || '').trim(),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (API_BASE_URL) {
+      return isEdit
+        ? await restRequest(`/api/tools/${encodeURIComponent(cleanNum)}`, { method: 'PUT', body: JSON.stringify(row) })
+        : await restRequest('/api/tools', { method: 'POST', body: JSON.stringify(row) });
+    }
+
+    const client = getSupabaseClient();
+    const { data, error } = await client
+      .from('tools')
+      .upsert(row, { onConflict: 'tool_number' })
+      .select()
+      .single();
+
+    if (!error) {
+      try {
+        await client.from('activity_logs').insert({
+          user_name: getActiveSession()?.user?.username || 'supervisor',
+          action: isEdit ? 'UPDATE' : 'CREATE',
+          record_type: 'Tool',
+          details: `${isEdit ? 'Updated' : 'Added'} tool ${cleanNum} (${row.part_name || 'No part name'}, ${row.status})`,
+        });
+      } catch {
+        // Non-fatal
+      }
+      return data;
+    }
+
+    if (!isMissingSchemaError(error)) {
+      throw new Error(error.message);
+    }
+
+    // Fallback catalog in app_settings
+    markSchemaFeatureMissing('tools_table');
+    const current = await this.getTools();
+    const idx = current.findIndex((t) => String(t.tool_number).toUpperCase() === cleanNum);
+    const savedItem = { ...row, id: idx >= 0 ? current[idx].id || Date.now() : Date.now() };
+    const next = idx >= 0 ? current.map((t, i) => (i === idx ? savedItem : t)) : [...current, savedItem];
+
+    const { error: setErr } = await client
+      .from('app_settings')
+      .upsert({ key: FALLBACK_TOOLS_SETTING_KEY, value: JSON.stringify(next) }, { onConflict: 'key' });
+    if (setErr) throw new Error(setErr.message);
+    return savedItem;
+  },
+
+  async deleteTool(toolNumber) {
+    assertCapability((c) => c.canDeleteTools || c.canManageTools, 'Permission denied to delete tool.');
+    const cleanNum = String(toolNumber || '').trim().toUpperCase();
+    if (!cleanNum) throw new Error('Tool Number is required.');
+
+    if (API_BASE_URL) {
+      return await restRequest(`/api/tools/${encodeURIComponent(cleanNum)}`, { method: 'DELETE' });
+    }
+
+    const client = getSupabaseClient();
+    const { count: historyCount } = await client
+      .from('production_records')
+      .select('id', { count: 'exact', head: true })
+      .eq('tool_number', cleanNum);
+
+    const { error } = await client.from('tools').delete().eq('tool_number', cleanNum);
+    if (!error) {
+      try {
+        await client.from('activity_logs').insert({
+          user_name: getActiveSession()?.user?.username || 'admin',
+          action: 'DELETE',
+          record_type: 'Tool',
+          details: `Deleted tool ${cleanNum} from Tool Directory (preserved ${historyCount || 0} historical production records)`,
+        });
+      } catch {
+        // Non-fatal
+      }
+      return { success: true, preservedHistoryCount: historyCount || 0 };
+    }
+
+    if (!isMissingSchemaError(error)) {
+      throw new Error(error.message);
+    }
+
+    markSchemaFeatureMissing('tools_table');
+    const { data: settingRow } = await client
+      .from('app_settings')
+      .select('value')
+      .eq('key', FALLBACK_TOOLS_SETTING_KEY)
+      .maybeSingle();
+    let stored = [];
+    if (settingRow?.value) {
+      try {
+        stored = JSON.parse(settingRow.value);
+      } catch {
+        stored = [];
+      }
+    }
+    const next = (Array.isArray(stored) ? stored : []).filter(
+      (t) => String(t.tool_number).toUpperCase() !== cleanNum
+    );
+    const { error: setErr } = await client
+      .from('app_settings')
+      .upsert({ key: FALLBACK_TOOLS_SETTING_KEY, value: JSON.stringify(next) }, { onConflict: 'key' });
+    if (setErr) throw new Error(setErr.message);
+    return { success: true, preservedHistoryCount: historyCount || 0 };
+  },
+
+  // ------------------------------------------------------------------
+  // PRODUCTION RECORDS, SCRAP, & DOWNTIME MANAGEMENT
+  // ------------------------------------------------------------------
   async getProductionRecords(params = {}) {
     if (API_BASE_URL) {
       const q = new URLSearchParams();
@@ -468,9 +854,30 @@ export const cloudApi = {
     if (params.toDate) q = q.lte('date', params.toDate);
     if (params.shift && params.shift !== 'ALL') q = q.eq('shift', params.shift);
     if (params.machine) q = q.eq('machine_or_line', params.machine);
+    if (params.tool) q = q.eq('tool_number', String(params.tool).toUpperCase());
     if (params.type && params.type !== 'ALL') q = q.eq('production_type', params.type);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
+    return data || [];
+  },
+
+  async getScrapEntries(params = {}) {
+    const client = getSupabaseClient();
+    if (!client) return [];
+    let q = client.from('scrap_entries').select('*').order('created_at', { ascending: false });
+    if (params.date) q = q.eq('date', params.date);
+    if (params.fromDate) q = q.gte('date', params.fromDate);
+    if (params.toDate) q = q.lte('date', params.toDate);
+    if (params.machine) q = q.eq('machine_or_line', params.machine);
+    if (params.tool) q = q.eq('tool_number', params.tool);
+    const { data, error } = await q;
+    if (error) {
+      if (isMissingSchemaError(error)) {
+        markSchemaFeatureMissing('scrap_entries_table');
+        return [];
+      }
+      throw new Error(error.message);
+    }
     return data || [];
   },
 
@@ -488,26 +895,46 @@ export const cloudApi = {
 
   async saveDowntimeCodes(codes) {
     assertCapability((c) => c.canManageDowntimeCodes, 'Only Admin can modify downtime codes.');
+    const cleanCodes = (codes || []).slice(0, 10).map((c, idx) => ({
+      code: String(c.code || `D${String(idx + 1).padStart(2, '0')}`).trim().toUpperCase(),
+      name: String(c.name || '').trim(),
+      description: String(c.description || '').trim(),
+      display_order: Number(c.display_order) || idx + 1,
+      is_active: c.is_active !== false,
+      updated_at: new Date().toISOString(),
+    }));
+    if (cleanCodes.some((c) => !c.code || !c.name)) {
+      throw new Error('Every downtime option must have a code and reason name.');
+    }
+
     if (API_BASE_URL) {
       return await restRequest('/api/downtime-codes', {
         method: 'POST',
-        body: JSON.stringify({ codes: codes.slice(0, 6) }),
+        body: JSON.stringify({ codes: cleanCodes }),
       });
     }
     const client = getSupabaseClient();
-    for (const c of codes.slice(0, 6)) {
-      const { error } = await client.from('downtime_codes').upsert(
-        {
-          code: c.code,
-          name: c.name,
-          description: c.description || '',
-          display_order: Number(c.display_order) || 1,
-          is_active: c.is_active !== false,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'code' }
-      );
+    const { data: existing } = await client.from('downtime_codes').select('code');
+    const keepSet = new Set(cleanCodes.map((c) => c.code));
+    const toRemove = (existing || []).map((e) => e.code).filter((code) => !keepSet.has(code));
+    if (toRemove.length > 0) {
+      await client.from('downtime_codes').delete().in('code', toRemove);
+    }
+
+    for (const c of cleanCodes) {
+      const { error } = await client.from('downtime_codes').upsert(c, { onConflict: 'code' });
       if (error) throw new Error(error.message);
+    }
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'UPDATE',
+        record_type: 'DowntimeCodes',
+        details: `Updated ${cleanCodes.length} configurable downtime reason option(s)`,
+      });
+    } catch {
+      // Non-fatal
     }
     return { success: true };
   },
@@ -519,7 +946,7 @@ export const cloudApi = {
     }
     const client = getSupabaseClient();
     if (!client) throw new Error('Cloud database is not configured.');
-    const { data, error } = await client.from('machine_downtime').select('*').order('created_at', { ascending: false }).limit(200);
+    const { data, error } = await client.from('machine_downtime').select('*').order('created_at', { ascending: false }).limit(300);
     if (error) throw new Error(error.message);
     return data || [];
   },
@@ -567,193 +994,400 @@ export const cloudApi = {
   },
 
   // ------------------------------------------------------------------
-  // PRODUCTION ENTRY (IDEMPOTENT + HONEST SYNC STATUS)
+  // MULTI-PART PRODUCTION ENTRY (NC UP TO 3 PARTS, TANDEM UP TO 4 PARTS)
   // ------------------------------------------------------------------
-  async submitProductionEntry(payload, { fromQueue = false } = {}) {
+  async submitProductionBatch(batchPayload, { fromQueue = false } = {}) {
     assertCapability((c) => c.canSubmitProduction, 'Read-only users cannot submit production entries.');
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      if (!fromQueue) enqueuePendingSubmission(payload, 'Device is offline.');
+      if (!fromQueue) enqueuePendingSubmission({ ...batchPayload, isBatch: true }, 'Device is offline.');
       const err = new Error('Device is offline. Entry queued safely for retry.');
       err.isOffline = true;
       throw err;
     }
 
+    const {
+      plant_id = 'Plant 1',
+      production_type,
+      machine_or_line,
+      date,
+      shift,
+      hour_interval,
+      operator_name,
+      supervisor_name = '',
+      tonnage = 0,
+      parts = [],
+      downtime_problems = [],
+      remarks = '',
+      entry_time,
+    } = batchPayload;
+
+    const cleanMachine = String(machine_or_line || '').trim().toUpperCase();
+    const { baseHour } = extractBaseHourAndPart(hour_interval);
+    const maxParts = production_type === 'Tandem' ? 4 : 3;
+
+    if (!cleanMachine || !date || !shift || !baseHour || !operator_name?.trim()) {
+      throw new Error('Date, Shift, Operator, Machine/Line, and Hour are required.');
+    }
+    if (!Array.isArray(parts) || parts.length === 0 || parts.length > maxParts) {
+      throw new Error(`Enter between 1 and ${maxParts} part(s) for ${production_type}.`);
+    }
+
+    // Validate Downtime Problems (up to 5, prevent overlapping/duplicate intervals)
+    const dtCheck = validateDowntimeProblems(downtime_problems, 5, 60);
+    if (!dtCheck.valid) {
+      throw new Error(dtCheck.error);
+    }
+
+    // Validate every part and its up to 5 scrap reasons
+    const preparedParts = parts.map((p, idx) => {
+      const partIdx = idx + 1;
+      const toolNum = String(p.tool_number || '').trim().toUpperCase();
+      const uph = Number(p.uph);
+      const runningMins = Number(p.running_minutes || 60);
+      const actual = Number(p.actual_qty);
+      const scrap = Number(p.rejected_qty || 0);
+
+      if (!toolNum) throw new Error(`Part ${partIdx}: Tool Number is required.`);
+      if (!Number.isFinite(uph) || uph <= 0 || uph > 50000) {
+        throw new Error(`Part ${partIdx}: Enter a valid UPH greater than 0.`);
+      }
+      if (!Number.isFinite(runningMins) || runningMins <= 0 || runningMins > 60) {
+        throw new Error(`Part ${partIdx}: Running duration must be between 1 and 60 minutes.`);
+      }
+      if (!Number.isInteger(actual) || actual < 0 || actual > 100000) {
+        throw new Error(`Part ${partIdx}: Enter a valid whole Actual Production quantity.`);
+      }
+      if (!Number.isInteger(scrap) || scrap < 0 || scrap > actual) {
+        throw new Error(`Part ${partIdx}: Scrap quantity cannot be negative or exceed Actual Production.`);
+      }
+
+      const scrapCheck = validateScrapReasons(scrap, p.scrap_breakdown || [], 5);
+      if (!scrapCheck.valid) {
+        throw new Error(`Part ${partIdx}: ${scrapCheck.error}`);
+      }
+
+      const target = calculateTargetFromUph(uph, runningMins);
+      const good = Math.max(0, actual - scrap);
+      const pct = target > 0 ? Number(((actual / target) * 100).toFixed(1)) : 0;
+
+      // Only Part 1 carries the hour's downtime_minutes so multi-part totals NEVER double-count downtime
+      const slotDowntimeMins = partIdx === 1 ? dtCheck.totalMinutes : 0;
+      const primaryDt = dtCheck.normalized[0] || null;
+
+      return {
+        part_index: partIdx,
+        plant_id,
+        production_type: production_type || (cleanMachine.startsWith('LP') || cleanMachine.startsWith('HP') ? 'Tandem' : 'NC'),
+        machine_or_line: cleanMachine,
+        date,
+        shift,
+        hour_interval: baseHour,
+        operator_name: operator_name.trim(),
+        supervisor_name,
+        tool_number: toolNum,
+        part_name: String(p.part_name || '').trim(),
+        tonnage: Number(tonnage) || 0,
+        running_minutes: runningMins,
+        running_hours: Number((runningMins / 60).toFixed(2)),
+        uph,
+        target_qty: target,
+        actual_qty: actual,
+        good_qty: good,
+        rejected_qty: scrap,
+        scrap_breakdown: scrapCheck.normalized,
+        downtime_minutes: slotDowntimeMins,
+        downtime_code: partIdx === 1 && primaryDt ? primaryDt.downtime_code : 'D01',
+        downtime_reason:
+          partIdx === 1 && dtCheck.normalized.length > 0
+            ? dtCheck.normalized.map((d) => `${d.downtime_reason} (${d.duration_minutes}m)`).join('; ')
+            : '',
+        downtime_problems: partIdx === 1 ? dtCheck.normalized : [],
+        remarks: String(remarks || p.remarks || '').trim(),
+        production_pct: pct,
+        hourly_output_pct: pct,
+        entry_time:
+          entry_time ||
+          new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+    });
+
     try {
       if (API_BASE_URL) {
-        return await restRequest('/api/production/hourly', { method: 'POST', body: JSON.stringify(payload) });
+        return await restRequest('/api/production/hourly-batch', {
+          method: 'POST',
+          body: JSON.stringify({ ...batchPayload, parts: preparedParts, downtime_problems: dtCheck.normalized }),
+        });
       }
+
       const client = getSupabaseClient();
       if (!client) throw new Error('Cloud database is not configured.');
 
-      const role = getCurrentRole();
-      if (role === ROLES.OPERATOR) {
-        // Try RPC first (when anonymous auth enabled), fallback to operator-entry edge function, else direct table upsert
-        const { data: rpcData, error: rpcErr } = await client.rpc('submit_production_entry', {
-          p_client_submission_id: payload.client_submission_id || null,
-          p_plant_id: payload.plant_id || 'Plant 1',
-          p_production_type: payload.production_type,
-          p_machine_or_line: payload.machine_or_line,
-          p_date: payload.date,
-          p_shift: payload.shift,
-          p_hour_interval: payload.hour_interval,
-          p_operator_name: payload.operator_name,
-          p_tool_number: payload.tool_number,
-          p_uph: payload.uph,
-          p_target_qty: payload.target_qty,
-          p_actual_qty: payload.actual_qty,
-          p_rejected_qty: payload.rejected_qty,
-          p_downtime_minutes: payload.downtime_minutes,
-          p_downtime_code: payload.downtime_code,
-          p_downtime_reason: payload.downtime_reason,
-          p_remarks: payload.remarks,
-          p_entry_time: payload.entry_time,
+      // 1. Try native multi-part schema first (part_index, scrap_breakdown, downtime_problems)
+      const nativeRows = preparedParts.map((p) => ({
+        plant_id: p.plant_id,
+        production_type: p.production_type,
+        machine_or_line: p.machine_or_line,
+        date: p.date,
+        shift: p.shift,
+        hour_interval: p.hour_interval,
+        part_index: p.part_index,
+        part_name: p.part_name,
+        operator_name: p.operator_name,
+        supervisor_name: p.supervisor_name,
+        tool_number: p.tool_number,
+        tonnage: p.tonnage,
+        running_minutes: p.running_minutes,
+        running_hours: p.running_hours,
+        uph: p.uph,
+        target_qty: p.target_qty,
+        actual_qty: p.actual_qty,
+        good_qty: p.good_qty,
+        rejected_qty: p.rejected_qty,
+        scrap_breakdown: p.scrap_breakdown,
+        downtime_minutes: p.downtime_minutes,
+        downtime_code: p.downtime_code,
+        downtime_reason: p.downtime_reason,
+        downtime_problems: p.downtime_problems,
+        remarks: p.remarks,
+        production_pct: p.production_pct,
+        hourly_output_pct: p.hourly_output_pct,
+        entry_time: p.entry_time,
+        submitted_by_role: getCurrentRole() || 'Operator',
+        updated_at: new Date().toISOString(),
+      }));
+
+      // Remove any excess part_index rows if user reduced part count on re-edit
+      await client
+        .from('production_records')
+        .delete()
+        .eq('machine_or_line', cleanMachine)
+        .eq('date', date)
+        .eq('shift', shift)
+        .eq('hour_interval', baseHour)
+        .gt('part_index', preparedParts.length);
+
+      const { data: savedNative, error: nativeErr } = await client
+        .from('production_records')
+        .upsert(nativeRows, { onConflict: 'machine_or_line,date,shift,hour_interval,part_index' })
+        .select();
+
+      let savedRecords = savedNative;
+      if (nativeErr) {
+        if (!isMissingSchemaError(nativeErr)) {
+          throw new Error(nativeErr.message);
+        }
+
+        // Schema-resilient fallback before SQL migration 202611260001 is run:
+        markSchemaFeatureMissing('production_multipart_columns');
+
+        // Clean up any excess [Part N] rows in this hour
+        for (let k = preparedParts.length + 1; k <= 4; k++) {
+          await client
+            .from('production_records')
+            .delete()
+            .eq('machine_or_line', cleanMachine)
+            .eq('date', date)
+            .eq('shift', shift)
+            .eq('hour_interval', `${baseHour} [Part ${k}]`);
+        }
+
+        const fallbackRows = preparedParts.map((p) => {
+          const metaObj = {
+            part_index: p.part_index,
+            part_name: p.part_name,
+            running_minutes: p.running_minutes,
+            scrap_breakdown: p.scrap_breakdown,
+            downtime_problems: p.downtime_problems,
+          };
+          const hasMeta =
+            p.part_name ||
+            p.running_minutes !== 60 ||
+            p.scrap_breakdown.length > 0 ||
+            p.downtime_problems.length > 0;
+          const packedRemarks = hasMeta
+            ? `${p.remarks ? `${p.remarks} ` : ''}||META:${JSON.stringify(metaObj)}`
+            : p.remarks;
+          return {
+            production_type: p.production_type,
+            machine_or_line: p.machine_or_line,
+            date: p.date,
+            shift: p.shift,
+            hour_interval: p.part_index === 1 ? baseHour : `${baseHour} [Part ${p.part_index}]`,
+            operator_name: p.operator_name,
+            supervisor_name: p.supervisor_name,
+            tool_number: p.tool_number,
+            tonnage: p.tonnage,
+            uph: p.uph,
+            target_qty: p.target_qty,
+            actual_qty: p.actual_qty,
+            good_qty: p.good_qty,
+            rejected_qty: p.rejected_qty,
+            downtime_minutes: p.downtime_minutes,
+            downtime_reason: p.downtime_reason,
+            remarks: packedRemarks,
+            production_pct: p.production_pct,
+            hourly_output_pct: p.hourly_output_pct,
+            entry_time: p.entry_time,
+          };
         });
-        if (!rpcErr && rpcData) return { success: true, record: rpcData };
+
+        const { data: savedFallback, error: fbErr } = await client
+          .from('production_records')
+          .upsert(fallbackRows, { onConflict: 'machine_or_line,date,shift,hour_interval' })
+          .select();
+
+        if (fbErr) throw new Error(fbErr.message);
+        savedRecords = savedFallback;
       }
 
-      const row = {
+      // 2. Sync normalized scrap_entries if table exists
+      if (savedRecords && savedRecords.length > 0) {
+        try {
+          // Clear previous scrap entries for this machine/date/shift/hour and re-insert cleanly
+          await client
+            .from('scrap_entries')
+            .delete()
+            .eq('machine_or_line', cleanMachine)
+            .eq('date', date)
+            .eq('shift', shift)
+            .eq('hour_interval', baseHour);
+
+          const scrapRows = [];
+          preparedParts.forEach((p, idx) => {
+            const prodRecId = savedRecords[idx]?.id || null;
+            (p.scrap_breakdown || []).forEach((sr, rIdx) => {
+              scrapRows.push({
+                production_record_id: prodRecId,
+                production_type: p.production_type,
+                machine_or_line: cleanMachine,
+                tool_number: p.tool_number,
+                date,
+                shift,
+                hour_interval: baseHour,
+                part_index: p.part_index,
+                reason_index: rIdx + 1,
+                reason_name: sr.reason_name,
+                is_custom: Boolean(sr.is_custom),
+                qty: Number(sr.qty) || 0,
+                operator_name: p.operator_name,
+              });
+            });
+          });
+          if (scrapRows.length > 0) {
+            const { error: sErr } = await client.from('scrap_entries').insert(scrapRows);
+            if (sErr && isMissingSchemaError(sErr)) {
+              markSchemaFeatureMissing('scrap_entries_table');
+            }
+          }
+        } catch {
+          // Scrap breakdown is already safely persisted in production_records
+        }
+      }
+
+      // 3. Sync machine_downtime log cleanly for this hour slot (preventing duplicates)
+      if (dtCheck.normalized.length > 0) {
+        try {
+          const { error: delDtErr } = await client
+            .from('machine_downtime')
+            .delete()
+            .eq('machine_number', cleanMachine)
+            .eq('date', date)
+            .eq('shift', shift)
+            .eq('hour_interval', baseHour);
+
+          if (!delDtErr) {
+            const dtRows = dtCheck.normalized.map((d) => ({
+              machine_number: cleanMachine,
+              machine_type: preparedParts[0].production_type,
+              date,
+              shift,
+              hour_interval: baseHour,
+              problem_index: d.problem_index,
+              start_time: d.start_time,
+              end_time: d.end_time,
+              duration_minutes: d.duration_minutes,
+              downtime_code: d.downtime_code,
+              reason: d.downtime_reason,
+              problem_description: d.problem_description,
+              operator_name: operator_name.trim(),
+              reported_by: operator_name.trim(),
+              status: 'Resolved',
+            }));
+            await client.from('machine_downtime').insert(dtRows);
+          } else if (isMissingSchemaError(delDtErr)) {
+            markSchemaFeatureMissing('machine_downtime_hour_cols');
+            // Minimal legacy insert when new columns aren't created yet
+            const legacyDtRows = dtCheck.normalized.map((d) => ({
+              machine_number: cleanMachine,
+              machine_type: preparedParts[0].production_type,
+              date,
+              shift,
+              start_time: d.start_time,
+              end_time: d.end_time,
+              duration_minutes: d.duration_minutes,
+              downtime_code: d.downtime_code,
+              reason: `${baseHour}: ${d.downtime_reason}${d.problem_description ? ` — ${d.problem_description}` : ''}`,
+              operator_name: operator_name.trim(),
+              status: 'Resolved',
+            }));
+            await client.from('machine_downtime').insert(legacyDtRows);
+          }
+        } catch {
+          // Downtime problems are already persisted on the production record
+        }
+      }
+
+      return { success: true, records: savedRecords || [] };
+    } catch (err) {
+      if (!fromQueue && (err.name === 'TypeError' || /network|fetch|offline/i.test(err.message))) {
+        enqueuePendingSubmission({ ...batchPayload, isBatch: true }, err.message);
+      }
+      throw err;
+    }
+  },
+
+  async submitProductionEntry(payload, options = {}) {
+    if (payload?.isBatch || Array.isArray(payload?.parts)) {
+      return await this.submitProductionBatch(payload, options);
+    }
+    // Single-record wrapper for backwards compatibility
+    const singlePart = {
+      tool_number: payload.tool_number,
+      part_name: payload.part_name || '',
+      uph: payload.uph,
+      running_minutes: payload.running_minutes || 60,
+      actual_qty: payload.actual_qty,
+      rejected_qty: payload.rejected_qty || 0,
+      scrap_breakdown: payload.scrap_breakdown || [],
+    };
+    const downtimeProblems =
+      Array.isArray(payload.downtime_problems) && payload.downtime_problems.length > 0
+        ? payload.downtime_problems
+        : [];
+    const res = await this.submitProductionBatch(
+      {
+        plant_id: payload.plant_id || 'Plant 1',
         production_type: payload.production_type,
         machine_or_line: payload.machine_or_line,
         date: payload.date,
         shift: payload.shift,
         hour_interval: payload.hour_interval,
-        operator_name: payload.operator_name || '',
+        operator_name: payload.operator_name,
         supervisor_name: payload.supervisor_name || '',
-        tool_number: payload.tool_number || '',
-        tonnage: Number(payload.tonnage) || 0,
-        uph: Number(payload.uph) || 0,
-        target_qty: Number(payload.target_qty) || 0,
-        actual_qty: Number(payload.actual_qty) || 0,
-        good_qty: Number(payload.good_qty) || 0,
-        rejected_qty: Number(payload.rejected_qty) || 0,
-        downtime_minutes: Number(payload.downtime_minutes) || 0,
-        downtime_reason: payload.downtime_reason || '',
+        tonnage: payload.tonnage || 0,
+        parts: [singlePart],
+        downtime_problems: downtimeProblems,
         remarks: payload.remarks || '',
-        production_pct: Number(payload.production_pct) || 0,
-        hourly_output_pct: Number(payload.hourly_output_pct) || 0,
-        entry_time: payload.entry_time || '',
-      };
-
-      const { data, error } = await client
-        .from('production_records')
-        .upsert(row, { onConflict: 'machine_or_line,date,shift,hour_interval' })
-        .select()
-        .single();
-
-      if (error) throw new Error(error.message);
-      return { success: true, record: data };
-    } catch (err) {
-      if (!fromQueue && (err.name === 'TypeError' || /network|fetch|offline/i.test(err.message))) {
-        enqueuePendingSubmission(payload, err.message);
-      }
-      throw err;
-    }
+        entry_time: payload.entry_time,
+      },
+      options
+    );
+    return { success: true, record: res.records?.[0] || null };
   },
 
   // ------------------------------------------------------------------
-  // ADMIN MACHINE CONFIGURATION (OPTIMISTIC CONCURRENCY + AUDIT)
-  // ------------------------------------------------------------------
-  async updateMachineConfig(machineNumber, updates) {
-    assertCapability((c) => c.canEditMachines, 'Only Admin can modify machine configuration.');
-
-    if (API_BASE_URL) {
-      return await restRequest(`/api/machines/${encodeURIComponent(machineNumber)}`, {
-        method: 'PUT',
-        body: JSON.stringify(updates),
-      });
-    }
-
-    const client = getSupabaseClient();
-    if (!client) throw new Error('Cloud database is not configured.');
-
-    // Fetch latest row first to detect conflicts when version is supported
-    const { data: current, error: fetchErr } = await client
-      .from('machines')
-      .select('*')
-      .eq('machine_number', machineNumber)
-      .single();
-    if (fetchErr || !current) throw new Error('Machine record not found.');
-
-    if (
-      updates.version !== undefined &&
-      current.version !== undefined &&
-      Number(updates.version) !== Number(current.version)
-    ) {
-      const err = new Error('Conflict: this machine was modified by another user. Reload the latest configuration before saving.');
-      err.isConflict = true;
-      throw err;
-    }
-
-    const nextPayload = {
-      machine_number: String(updates.machine_number || current.machine_number).trim().toUpperCase(),
-      machine_type: updates.machine_type || current.machine_type,
-      tonnage: Number(updates.tonnage),
-      production_target: Number(updates.production_target),
-      status: updates.status || current.status,
-      assigned_operator: updates.assigned_operator ?? current.assigned_operator ?? '',
-      assigned_shift: updates.assigned_shift ?? current.assigned_shift ?? 'Shift A',
-      maintenance_notes: updates.maintenance_notes ?? current.maintenance_notes ?? '',
-    };
-
-    if (current.version !== undefined) {
-      nextPayload.version = Number(current.version) + 1;
-      nextPayload.updated_at = new Date().toISOString();
-      nextPayload.updated_by = getActiveSession()?.user?.username || 'admin';
-    }
-
-    const { data, error } = await client
-      .from('machines')
-      .update(nextPayload)
-      .eq('id', current.id)
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-
-    // Record audit entry
-    await client.from('activity_logs').insert({
-      user_name: getActiveSession()?.user?.username || 'admin',
-      action: 'UPDATE',
-      record_type: 'Machine',
-      details: `Updated ${machineNumber} -> ${nextPayload.machine_number} (${nextPayload.machine_type}, ${nextPayload.tonnage}T, target ${nextPayload.production_target}, status ${nextPayload.status})`,
-    });
-
-    return { success: true, machine: data };
-  },
-
-  async createMachine(machineData) {
-    assertCapability((c) => c.canEditMachines, 'Only Admin can register new machines.');
-    if (API_BASE_URL) {
-      return await restRequest('/api/machines', { method: 'POST', body: JSON.stringify(machineData) });
-    }
-    const client = getSupabaseClient();
-    const { data, error } = await client
-      .from('machines')
-      .insert({
-        machine_number: String(machineData.machine_number).trim().toUpperCase(),
-        machine_type: machineData.machine_type || 'NC',
-        tonnage: Number(machineData.tonnage) || 0,
-        production_target: Number(machineData.production_target) || 500,
-        status: machineData.status || 'Idle',
-        assigned_operator: machineData.assigned_operator || '',
-        assigned_shift: machineData.assigned_shift || 'Shift A',
-        maintenance_notes: machineData.maintenance_notes || '',
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-
-    await client.from('activity_logs').insert({
-      user_name: getActiveSession()?.user?.username || 'admin',
-      action: 'CREATE',
-      record_type: 'Machine',
-      details: `Added machine ${data.machine_number} (${data.machine_type}, ${data.tonnage}T)`,
-    });
-    return data;
-  },
-
-  // ------------------------------------------------------------------
-  // EMPLOYEES & ATTENDANCE (ROLE-SCOPED PROJECTIONS)
+  // EMPLOYEES & ATTENDANCE (MANPOWER DIRECTORY WITH PHONE & EMAIL)
   // ------------------------------------------------------------------
   async getOperationalRoster() {
     if (API_BASE_URL) {
@@ -778,18 +1412,21 @@ export const cloudApi = {
       return res.employees || [];
     }
     const client = getSupabaseClient();
-    const caps = getCapabilities(getCurrentRole());
-    const cols = caps.canViewPersonalEmployeeFields
-      ? 'id, emp_id, name, department, designation, phone, email, shift, assigned_machine, status'
-      : 'id, emp_id, name, department, designation, shift, assigned_machine, status';
-    const { data, error } = await client.from('employees').select(cols).order('emp_id');
+    const { data, error } = await client
+      .from('employees')
+      .select('id, emp_id, name, department, designation, phone, email, joining_date, shift, assigned_machine, status, updated_at')
+      .order('emp_id');
     if (error) throw new Error(error.message);
     return data || [];
   },
 
   async saveEmployee(emp, isEdit = false) {
     assertCapability((c) => c.canManageEmployees, 'Permission denied.');
-    const caps = getCapabilities(getCurrentRole());
+    const phoneRes = validatePhoneNumber(emp.phone);
+    if (!phoneRes.valid) throw new Error(phoneRes.error);
+    const emailRes = validateEmailAddress(emp.email);
+    if (!emailRes.valid) throw new Error(emailRes.error);
+
     if (API_BASE_URL) {
       return isEdit
         ? await restRequest(`/api/employees/${encodeURIComponent(emp.emp_id)}`, { method: 'PUT', body: JSON.stringify(emp) })
@@ -800,16 +1437,15 @@ export const cloudApi = {
       emp_id: String(emp.emp_id).trim().toUpperCase(),
       name: String(emp.name).trim(),
       department: emp.department || 'NC Production',
-      designation: emp.designation || 'Operator',
+      designation: String(emp.designation || 'Operator').trim(),
+      phone: phoneRes.normalized,
+      email: emailRes.normalized,
+      joining_date: String(emp.joining_date || '').trim(),
       shift: emp.shift || 'Shift A',
       assigned_machine: emp.assigned_machine || '',
       status: emp.status || 'Active',
       updated_at: new Date().toISOString(),
     };
-    if (caps.canViewPersonalEmployeeFields) {
-      row.phone = emp.phone || '';
-      row.email = emp.email || '';
-    }
     const { data, error } = await client.from('employees').upsert(row, { onConflict: 'emp_id' }).select().single();
     if (error) throw new Error(error.message);
     return data;
@@ -838,7 +1474,7 @@ export const cloudApi = {
     const client = getSupabaseClient();
     let q = client.from('attendance').select('*');
     if (date) q = q.eq('date', date);
-    if (shift) q = q.eq('shift', shift);
+    if (shift && shift !== 'ALL') q = q.eq('shift', shift);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     return data || [];
@@ -875,7 +1511,17 @@ export const cloudApi = {
     const client = getSupabaseClient();
     const { data, error } = await client.from('shift_handovers').select('*').order('date', { ascending: false }).limit(100);
     if (error) throw new Error(error.message);
-    return data || [];
+    return (data || []).map((h) => ({
+      ...h,
+      from_shift: h.from_shift || h.outgoing_shift || 'Shift A',
+      to_shift: h.to_shift || h.incoming_shift || 'Shift B',
+      machine_summary: h.machine_summary || h.handover_notes || '',
+      pending_issues: h.pending_issues || h.machine_problems || '',
+      tooling_status: h.tooling_status || h.quality_issues || '',
+      safety_notes: h.safety_notes || h.follow_up_actions || '',
+      handover_by: h.handover_by || h.responsible_person || 'Supervisor',
+      status: h.status || (h.completion_status === 'Resolved' ? 'Acknowledged' : h.completion_status || 'Open'),
+    }));
   },
 
   async saveHandover(h) {
@@ -886,7 +1532,21 @@ export const cloudApi = {
         : await restRequest('/api/handovers', { method: 'POST', body: JSON.stringify(h) });
     }
     const client = getSupabaseClient();
-    const { data, error } = await client.from('shift_handovers').upsert(h).select().single();
+    const baseRow = {
+      date: h.date,
+      outgoing_shift: h.from_shift || h.outgoing_shift || 'Shift A',
+      incoming_shift: h.to_shift || h.incoming_shift || 'Shift B',
+      department_or_machine: h.department_or_machine || 'All Shopfloor',
+      handover_notes: h.machine_summary || h.handover_notes || h.pending_issues || 'Shift handover',
+      machine_problems: h.pending_issues || h.machine_problems || '',
+      quality_issues: h.tooling_status || h.quality_issues || '',
+      follow_up_actions: h.safety_notes || h.follow_up_actions || '',
+      responsible_person: h.handover_by || h.responsible_person || 'Supervisor',
+      completion_status: h.status === 'Acknowledged' || h.status === 'Resolved' ? 'Resolved' : 'Open',
+    };
+    if (h.id) baseRow.id = h.id;
+
+    const { data, error } = await client.from('shift_handovers').upsert(baseRow).select().single();
     if (error) throw new Error(error.message);
     return data;
   },
@@ -916,7 +1576,7 @@ export const cloudApi = {
         {
           machine_number: plan.machine_number,
           plan_index: Number(plan.plan_index) || 1,
-          tool_number: plan.tool_number,
+          tool_number: String(plan.tool_number || '').trim().toUpperCase(),
           plan_quantity: Number(plan.plan_quantity) || 0,
           part_name: plan.part_name || '',
           status: plan.status || 'Queued',
@@ -981,12 +1641,16 @@ export const cloudApi = {
       );
       if (error) throw new Error(error.message);
     }
-    await client.from('activity_logs').insert({
-      user_name: getActiveSession()?.user?.username || 'admin',
-      action: 'UPDATE',
-      record_type: 'Settings',
-      details: 'Updated plant operational settings',
-    });
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'UPDATE',
+        record_type: 'Settings',
+        details: 'Updated plant operational settings',
+      });
+    } catch {
+      // Non-fatal
+    }
     return { success: true };
   },
 
@@ -1037,11 +1701,11 @@ export const cloudApi = {
       return await restRequest('/api/activity-logs');
     }
     const client = getSupabaseClient();
-    const [{ data: logs, error: lErr }, { data: recoveryLogs }] = await Promise.all([
+    const [{ data: logs, error: lErr }, recoveryRes] = await Promise.all([
       client.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(200),
       client.from('recovery_audit_logs').select('*').order('created_at', { ascending: false }).limit(100),
     ]);
     if (lErr) throw new Error(lErr.message);
-    return { logs: logs || [], recovery_logs: recoveryLogs || [] };
+    return { logs: logs || [], recovery_logs: recoveryRes?.data || [] };
   },
 };
