@@ -40,6 +40,9 @@ export default function MachinesView({
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [deleteModalError, setDeleteModalError] = useState('');
+  const [deleteDowntimeTarget, setDeleteDowntimeTarget] = useState(null);
+  const [deletingDowntime, setDeletingDowntime] = useState(false);
 
   // Downtime Codes State (Admin only, up to 10 options)
   const [codesDraft, setCodesDraft] = useState(() =>
@@ -171,17 +174,19 @@ export default function MachinesView({
     if (!caps.canDeleteMachines) return;
     setDeleteTarget(m);
     setDeleteConfirmText('');
+    setDeleteModalError('');
   };
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget || !caps.canDeleteMachines) return;
     const expected = String(deleteTarget.machine_number || '').trim().toUpperCase();
     if (deleteConfirmText.trim().toUpperCase() !== expected) {
-      setNotice({ type: 'err', message: `Type "${expected}" exactly to confirm deletion.` });
+      setDeleteModalError(`Type "${expected}" exactly to confirm deletion.`);
       return;
     }
     try {
       setDeleting(true);
+      setDeleteModalError('');
       const res = await cloudApi.deleteMachine(expected);
       setNotice({
         type: 'ok',
@@ -189,11 +194,31 @@ export default function MachinesView({
       });
       setDeleteTarget(null);
       setDeleteConfirmText('');
-      if (onReload) onReload();
+      if (onReload) await onReload();
     } catch (e) {
-      setNotice({ type: 'err', message: e.message || 'Unable to delete machine.' });
+      const msg = e.message || 'Unable to delete machine.';
+      setDeleteModalError(msg);
+      setNotice({ type: 'err', message: msg });
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleConfirmDeleteDowntime = async () => {
+    if (!deleteDowntimeTarget || !(caps.canDeleteDowntime || caps.canDeleteMachines)) return;
+    try {
+      setDeletingDowntime(true);
+      await cloudApi.deleteMachineDowntime(deleteDowntimeTarget.id);
+      setNotice({
+        type: 'ok',
+        message: `Deleted downtime log #${deleteDowntimeTarget.id} (${deleteDowntimeTarget.machine_number}).`,
+      });
+      setDeleteDowntimeTarget(null);
+      if (onReload) await onReload();
+    } catch (e) {
+      setNotice({ type: 'err', message: e.message || 'Unable to delete downtime log.' });
+    } finally {
+      setDeletingDowntime(false);
     }
   };
 
@@ -477,12 +502,13 @@ export default function MachinesView({
                   <th>Reason &amp; Problem</th>
                   <th>Operator</th>
                   <th>Status</th>
+                  {(caps.canDeleteDowntime || caps.canDeleteMachines || caps.canSubmitProduction) && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {downtimes.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>No downtime records found.</td>
+                    <td colSpan={9} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>No downtime records found.</td>
                   </tr>
                 ) : (
                   downtimes.map((d) => (
@@ -500,6 +526,39 @@ export default function MachinesView({
                       </td>
                       <td>{d.operator_name || '—'}</td>
                       <td><span className={`status-pill ${d.status === 'Open' ? 'is-err' : 'is-ok'}`}>{d.status}</span></td>
+                      {(caps.canDeleteDowntime || caps.canDeleteMachines || caps.canSubmitProduction) && (
+                        <td>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {d.status === 'Open' && caps.canSubmitProduction && (
+                              <button
+                                type="button"
+                                className="btn btn-green btn-sm"
+                                onClick={async () => {
+                                  try {
+                                    await cloudApi.resolveMachineDowntime(d.id, { duration_minutes: 15 });
+                                    setNotice({ type: 'ok', message: `Resolved downtime on ${d.machine_number}.` });
+                                    if (onReload) await onReload();
+                                  } catch (err) {
+                                    setNotice({ type: 'err', message: err.message || 'Unable to resolve downtime.' });
+                                  }
+                                }}
+                              >
+                                Resolve
+                              </button>
+                            )}
+                            {(caps.canDeleteDowntime || caps.canDeleteMachines) && (
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                aria-label={`Delete downtime log ${d.id}`}
+                                onClick={() => setDeleteDowntimeTarget(d)}
+                              >
+                                <Trash2 size={13} /> Delete
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))
                 )}
@@ -758,6 +817,13 @@ export default function MachinesView({
               </button>
             </div>
             <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {deleteModalError && (
+                <div className="banner is-err" role="alert">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <AlertCircle size={15} /> {deleteModalError}
+                  </span>
+                </div>
+              )}
               <div className="banner is-err" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
                 <div>
                   You are about to remove machine <strong className="mono" style={{ fontSize: '1rem' }}>{deleteTarget.machine_number}</strong> ({deleteTarget.machine_type}, {deleteTarget.tonnage}T) from the active Machine Directory.
@@ -783,7 +849,7 @@ export default function MachinesView({
               </div>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>
+              <button type="button" className="btn btn-secondary" onClick={() => { setDeleteTarget(null); setDeleteModalError(''); }} disabled={deleting}>
                 Cancel
               </button>
               <button
@@ -793,6 +859,36 @@ export default function MachinesView({
                 onClick={handleConfirmDelete}
               >
                 {deleting ? 'Deleting...' : `Delete ${deleteTarget.machine_number}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteDowntimeTarget && (caps.canDeleteDowntime || caps.canDeleteMachines) && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="del-dt-title">
+          <div className="modal-dialog" style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3 id="del-dt-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Delete Downtime Record?
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteDowntimeTarget(null)} disabled={deletingDowntime}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p>
+                Remove downtime log <strong className="mono">#{deleteDowntimeTarget.id}</strong> for machine{' '}
+                <strong className="mono">{deleteDowntimeTarget.machine_number}</strong> ({deleteDowntimeTarget.reason || deleteDowntimeTarget.breakdown_reason})?
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteDowntimeTarget(null)} disabled={deletingDowntime}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" onClick={handleConfirmDeleteDowntime} disabled={deletingDowntime}>
+                {deletingDowntime ? 'Deleting...' : 'Confirm Delete'}
               </button>
             </div>
           </div>

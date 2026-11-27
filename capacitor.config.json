@@ -1,9 +1,9 @@
 {
   "appId": "com.phaindia.mes",
-  "appName": "PRESS SHOP MFG-2",
+  "appName": "PHA INDIA",
   "webDir": "dist",
   "server": {
-    "androidScheme": "http",
-    "cleartext": true
+    "androidScheme": "https",
+    "cleartext": false
   }
 }

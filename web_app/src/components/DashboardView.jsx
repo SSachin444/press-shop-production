@@ -228,12 +228,12 @@ export default function DashboardView({
 
       {dataState !== 'loading' && (
         <>
-          {/* 10 MANDATORY DASHBOARD KPI CARDS (ORANGE + GREEN INDUSTRIAL THEME) */}
+          {/* 10 MANDATORY DASHBOARD KPI CARDS (INDUSTRIAL NAVY / BLUE / GREEN / ORANGE / RED) */}
           <section className="kpi-grid-5" aria-label="Plant production KPI cards">
-            <button type="button" className="kpi-box is-orange-accent" onClick={() => onNavigate('production')}>
+            <button type="button" className="kpi-box is-blue-accent" onClick={() => onNavigate('production')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Total Production</span>
-                <Factory size={15} className="kpi-icon-orange" />
+                <Factory size={15} style={{ color: 'var(--blue)' }} />
               </span>
               <div className="kpi-number tabular">
                 {totals.actual.toLocaleString()}
@@ -261,9 +261,9 @@ export default function DashboardView({
             <button type="button" className="kpi-box is-orange-accent" onClick={() => onNavigate('tandem-production')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Tandem Production</span>
-                <GitBranch size={15} className="kpi-icon-orange" />
+                <GitBranch size={15} style={{ color: 'var(--orange)' }} />
               </span>
-              <div className="kpi-number tabular" style={{ color: 'var(--accent-hover)' }}>
+              <div className="kpi-number tabular" style={{ color: 'var(--orange-ink)' }}>
                 {tandemTotals.actual.toLocaleString()}
                 <span className="kpi-unit">pcs</span>
               </div>
@@ -285,10 +285,10 @@ export default function DashboardView({
               </span>
             </button>
 
-            <button type="button" className="kpi-box" onClick={() => onNavigate('production')}>
+            <button type="button" className="kpi-box is-orange-accent" onClick={() => onNavigate('production')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Current Shift ({liveShiftName})</span>
-                <Activity size={15} className="kpi-icon-orange" />
+                <Activity size={15} style={{ color: 'var(--orange)' }} />
               </span>
               <div className="kpi-number tabular">
                 {currentShiftMetrics.totals.actual.toLocaleString()}
@@ -299,10 +299,10 @@ export default function DashboardView({
               </span>
             </button>
 
-            <button type="button" className="kpi-box" onClick={() => onNavigate('machines')}>
+            <button type="button" className="kpi-box is-blue-accent" onClick={() => onNavigate('machines')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Total Machines</span>
-                <Cpu size={15} className="kpi-icon-orange" />
+                <Cpu size={15} style={{ color: 'var(--blue)' }} />
               </span>
               <div className="kpi-number tabular">
                 {machineCounts.total}
@@ -327,10 +327,10 @@ export default function DashboardView({
               </span>
             </button>
 
-            <button type="button" className="kpi-box" onClick={() => onNavigate('employees')}>
+            <button type="button" className="kpi-box is-blue-accent" onClick={() => onNavigate('employees')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Total Manpower</span>
-                <Users size={15} className="kpi-icon-green" />
+                <Users size={15} style={{ color: 'var(--blue)' }} />
               </span>
               <div className="kpi-number tabular">
                 {employeesCount}
@@ -339,12 +339,12 @@ export default function DashboardView({
               <span className="kpi-comparison">Active plant roster</span>
             </button>
 
-            <button type="button" className="kpi-box is-orange-accent" onClick={() => onNavigate('reports')}>
+            <button type="button" className="kpi-box is-red-accent" onClick={() => onNavigate('reports')}>
               <span className="kpi-head-row">
                 <span className="kpi-label">Total Scrap</span>
-                <AlertTriangle size={15} className="kpi-icon-orange" />
+                <AlertTriangle size={15} style={{ color: 'var(--status-err)' }} />
               </span>
-              <div className="kpi-number tabular">
+              <div className="kpi-number tabular" style={{ color: 'var(--status-err-ink)' }}>
                 {totals.rejected.toLocaleString()}
                 <span className="kpi-unit">pcs</span>
               </div>

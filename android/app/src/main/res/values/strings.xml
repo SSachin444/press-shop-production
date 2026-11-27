@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PHA Press Shop</string>
+    <string name="app_name">PHA INDIA</string>
+    <string name="title_activity_main">PHA INDIA</string>
+    <string name="package_name">com.phaindia.mes</string>
+    <string name="custom_url_scheme">com.phaindia.mes</string>
     <string name="company_name">PHA INDIA PVT. LTD.</string>
 </resources>

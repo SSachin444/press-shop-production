@@ -15,10 +15,10 @@ export default function CircularGauge({
   const tone = getAchievementTone(numVal, target, threshold);
 
   const colorMap = {
-    green: { stroke: '#16a34a', track: '#dcfce7', text: '#166534', badgeBg: '#f0fdf4' },
-    orange: { stroke: '#ea580c', track: '#ffedd5', text: '#c2410c', badgeBg: '#fff7ed' },
-    red: { stroke: '#dc2626', track: '#fee2e2', text: '#991b1b', badgeBg: '#fef2f2' },
-    neutral: { stroke: '#94a3b8', track: '#e2e8f0', text: '#475569', badgeBg: '#f8fafc' },
+    green: { stroke: '#16A34A', track: '#DCFCE7', text: '#166534', badgeBg: '#F0FDF4' },
+    orange: { stroke: '#F97316', track: '#FFEDD5', text: '#C2410C', badgeBg: '#FFF7ED' },
+    red: { stroke: '#DC2626', track: '#FEE2E2', text: '#991B1B', badgeBg: '#FEF2F2' },
+    neutral: { stroke: '#64748B', track: '#E2E8F0', text: '#14243A', badgeBg: '#F4F7FB' },
   };
   const palette = colorMap[tone] || colorMap.neutral;
 

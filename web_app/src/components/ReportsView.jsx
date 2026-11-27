@@ -1,8 +1,11 @@
 import React, { useState, useMemo } from 'react';
-import { Download, Printer, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
+import { Download, Printer, AlertCircle, CheckCircle2, RotateCcw, Trash2, ShieldAlert, X } from 'lucide-react';
+import { getCapabilities } from '../config/roles';
+import { cloudApi } from '../services/cloudClient';
 import { PLANTS, filterProductionRecords, buildCsvDocument, deduplicateSlotDowntime } from '../services/metrics';
 
-export default function ReportsView({ selectedPlant, selectedDate, machines, records, onRefresh }) {
+export default function ReportsView({ selectedPlant, selectedDate, machines, records, currentUser, onRefresh }) {
+  const caps = getCapabilities(currentUser?.role);
   const [plant, setPlant] = useState(selectedPlant || 'ALL');
   const [fromDate, setFromDate] = useState(selectedDate);
   const [toDate, setToDate] = useState(selectedDate);
@@ -12,6 +15,9 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
   const [operator, setOperator] = useState('');
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const filteredRows = useMemo(
     () =>
@@ -305,6 +311,7 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
                     <th>Scrap</th>
                     <th>Ach %</th>
                     <th>Downtime</th>
+                    {caps.canDeleteProduction && <th>Action</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -322,6 +329,25 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
                       <td className="tabular">{r.rejected_qty.toLocaleString()}</td>
                       <td className="tabular">{r.achievement_pct}%</td>
                       <td className="tabular">{r.downtime_minutes}m</td>
+                      {caps.canDeleteProduction && (
+                        <td>
+                          {r.id ? (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              aria-label={`Delete production record ${r.id}`}
+                              onClick={() => {
+                                setDeleteError('');
+                                setDeleteTarget(r);
+                              }}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -341,12 +367,87 @@ export default function ReportsView({ selectedPlant, selectedDate, machines, rec
                   <div style={{ fontSize: '0.78rem', color: 'var(--ink-muted)', marginTop: 2 }}>
                     Tool: {r.tool_number || '—'} • Operator: {r.operator_name || '—'} • DT: {r.downtime_minutes}m
                   </div>
+                  {caps.canDeleteProduction && r.id && (
+                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        onClick={() => {
+                          setDeleteError('');
+                          setDeleteTarget(r);
+                        }}
+                      >
+                        <Trash2 size={13} /> Delete Record
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           </>
         )}
       </section>
+
+      {deleteTarget && caps.canDeleteProduction && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="rep-del-title">
+          <div className="modal-dialog" style={{ maxWidth: 440 }}>
+            <div className="modal-head">
+              <h3 id="rep-del-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Delete Production Record?
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {deleteError && (
+                <div className="banner is-err" role="alert">
+                  <span>{deleteError}</span>
+                </div>
+              )}
+              <p>
+                Permanently remove the production entry for <strong className="mono">{deleteTarget.machine_or_line}</strong> on{' '}
+                <strong className="tabular">{deleteTarget.date}</strong> ({deleteTarget.shift}, {deleteTarget.hour_interval}, Tool{' '}
+                <strong className="mono">{deleteTarget.tool_number || '—'}</strong>, Actual{' '}
+                <strong className="tabular">{deleteTarget.actual_qty}</strong>)?
+              </p>
+              <div className="banner is-warn" style={{ fontSize: '0.8rem' }}>
+                <span>This deletes only this production entry row without touching Machine or Tool directory masters.</span>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError('');
+                  try {
+                    await cloudApi.deleteProductionRecord(deleteTarget.id);
+                    setNotice({
+                      type: 'ok',
+                      message: `Deleted production record #${deleteTarget.id} (${deleteTarget.machine_or_line}, ${deleteTarget.hour_interval}).`,
+                    });
+                    setDeleteTarget(null);
+                    if (onRefresh) await onRefresh();
+                  } catch (err) {
+                    setDeleteError(err?.message || 'Unable to delete production record.');
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

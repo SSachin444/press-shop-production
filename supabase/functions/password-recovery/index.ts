@@ -4,7 +4,8 @@
 // - verify-recovery-email (Admin only)
 // - request-reset (rate-limited, verified email required, short-lived single-use code, audited, generic response)
 // - confirm-reset (single-use, expiry check, strong password validation, audited)
-// - complete-first-login-password (enforces replacement of temporary credentials)
+// - complete-password-change (authenticated user password update)
+// - change-username (authenticated user ID / username update with uniqueness check)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -12,6 +13,8 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/;
 
 async function sha256Hex(input: string): Promise<string> {
   const bytes = new TextEncoder().encode(input);
@@ -80,7 +83,7 @@ Deno.serve(async (req) => {
     const action = body.action as string;
 
     // Actions requiring an authenticated session
-    if (['set-recovery-email', 'verify-recovery-email', 'complete-password-change'].includes(action)) {
+    if (['set-recovery-email', 'verify-recovery-email', 'complete-password-change', 'change-username'].includes(action)) {
       const authHeader = req.headers.get('Authorization') ?? '';
       const userClient = createClient(supabaseUrl, anonKey, {
         global: { headers: { Authorization: authHeader } },
@@ -102,6 +105,74 @@ Deno.serve(async (req) => {
       if (!profile || !profile.is_active) {
         return new Response(JSON.stringify({ error: 'Account inactive' }), {
           status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (action === 'change-username') {
+        const nextUsername = String(body.new_username || '').trim().toLowerCase();
+        if (!USERNAME_RE.test(nextUsername)) {
+          return new Response(
+            JSON.stringify({ error: 'User ID must be 3-32 characters using letters, numbers, dots, underscores, or hyphens.' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (nextUsername === String(profile.username || '').toLowerCase()) {
+          return new Response(JSON.stringify({ error: 'New User ID must differ from your current User ID.' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const { data: dup } = await adminClient
+          .from('user_profiles')
+          .select('id')
+          .ilike('username', nextUsername)
+          .neq('id', profile.id)
+          .maybeSingle();
+
+        if (dup) {
+          return new Response(JSON.stringify({ error: `User ID "${nextUsername}" is already in use.` }), {
+            status: 409,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const { error: metaErr } = await adminClient.auth.admin.updateUserById(profile.id, {
+          user_metadata: { ...(userData.user.user_metadata || {}), username: nextUsername },
+        });
+        if (metaErr) throw metaErr;
+
+        const { error: profErr } = await adminClient
+          .from('user_profiles')
+          .update({
+            username: nextUsername,
+            auth_email: userData.user.email || profile.auth_email || '',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', profile.id);
+        if (profErr) throw profErr;
+
+        await adminClient.from('recovery_audit_logs').insert({
+          target_role: profile.role,
+          email: userData.user.email || '',
+          event_type: 'USERNAME_CHANGED',
+          success: true,
+          ip_address: ipAddress,
+          detail: `${profile.username} -> ${nextUsername}`,
+        });
+
+        await adminClient.from('activity_logs').insert({
+          user_name: nextUsername,
+          actor_role: profile.role,
+          action: 'UPDATE',
+          record_type: 'Account',
+          record_id: profile.id,
+          details: `Changed User ID from ${profile.username} to ${nextUsername}`,
+        });
+
+        return new Response(JSON.stringify({ success: true, username: nextUsername }), {
+          status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -261,7 +332,6 @@ Deno.serve(async (req) => {
       const targetRole = body.role === 'Supervisor' ? 'Supervisor' : 'Admin';
       const email = String(body.email || '').trim().toLowerCase();
 
-      // Rate limit: max 3 requests in last 15 minutes per IP or role
       const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       const { count } = await adminClient
         .from('recovery_audit_logs')
@@ -277,7 +347,6 @@ Deno.serve(async (req) => {
         );
       }
 
-      // Generic non-enumerating success message
       const genericMsg = 'If a verified recovery email matches this account, a short-lived reset code has been sent.';
 
       const { data: targetProfile } = await adminClient
@@ -398,7 +467,6 @@ Deno.serve(async (req) => {
         });
       }
 
-      // Single-use invalidation + password update
       await adminClient
         .from('password_recovery_tokens')
         .update({ used_at: new Date().toISOString() })

@@ -13,7 +13,13 @@ import {
 import {
   computeProductionMetrics,
   buildCsvDocument,
+  calculateFullHourTargetFromUph,
   calculateTargetFromUph,
+  computeTimeAllocationSummary,
+  validateTimeAllocation,
+  normalizeWhatsAppPhone,
+  WHATSAPP_REPORT_TYPES,
+  generateWhatsAppReportText,
   validatePhoneNumber,
   validateEmailAddress,
   validateScrapReasons,
@@ -38,6 +44,8 @@ import ToolsView from '../components/ToolsView';
 import ProductionSummaryView from '../components/ProductionSummaryView';
 import LiveCellStatusView from '../components/LiveCellStatusView';
 import MechanicalPressBackground from '../components/MechanicalPressBackground';
+import WhatsAppReportsView from '../components/WhatsAppReportsView';
+import PasswordModal from '../components/PasswordModal';
 
 describe('Metrics Calculation Engine & Validations', () => {
   const machines = [
@@ -124,9 +132,18 @@ describe('Metrics Calculation Engine & Validations', () => {
     },
   ];
 
-  it('calculates UPH target from UPH × running hours and prevents downtime double-counting on multi-part hours', () => {
-    expect(calculateTargetFromUph(1200, 60)).toBe(1200);
-    expect(calculateTargetFromUph(1200, 30)).toBe(600);
+  it('calculates UPH × 60 full-hour target, Applicable Target (UPH × min), 60-min time pool, and prevents downtime double-counting', () => {
+    expect(calculateFullHourTargetFromUph(120)).toBe(7200);
+    expect(calculateTargetFromUph(120, 60)).toBe(7200);
+    expect(calculateTargetFromUph(120, 30)).toBe(3600);
+    expect(calculateTargetFromUph(120, 20)).toBe(2400);
+
+    const poolAfterFirst = computeTimeAllocationSummary([{ running_minutes: 30 }]);
+    expect(poolAfterFirst.remainingMinutes).toBe(30);
+    const poolAfterSecond = computeTimeAllocationSummary([{ running_minutes: 30 }, { running_minutes: 20 }]);
+    expect(poolAfterSecond.remainingMinutes).toBe(10);
+    const overPool = validateTimeAllocation([{ running_minutes: 40 }, { running_minutes: 30 }], 60, true);
+    expect(overPool.valid).toBe(false);
 
     const metrics = computeProductionMetrics(records, machines, [], {
       plant: 'Plant 1',
@@ -373,27 +390,42 @@ describe('UI Components & Multi-Part Workflows', () => {
       />
     );
 
-    fireEvent.change(screen.getByLabelText(/5\. UPH/i), { target: { value: '1200' } });
+    fireEvent.change(screen.getByLabelText(/5\. Machine Speed \(UPH\)/i), { target: { value: '120' } });
     fireEvent.change(document.getElementById('nc-p1-tool'), { target: { value: 'T001' } });
-    fireEvent.change(screen.getByLabelText(/8\. Actual Production/i), { target: { value: '1000' } });
+    fireEvent.change(document.getElementById('nc-p1-run'), { target: { value: '30' } });
+    fireEvent.change(screen.getByLabelText(/8\. Actual Production/i), { target: { value: '3500' } });
 
-    // Add Part 2
-    fireEvent.click(screen.getByRole('button', { name: /add part/i }));
+    // Read-only Full-Hour Target = UPH x 60 (120 x 60 = 7,200) and Applicable Target = 120 x 30 = 3,600
+    expect(screen.getAllByText(/7,200 pcs\/hr/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/3,600 pcs/i).length).toBeGreaterThan(0);
+
+    // Add Part 2: auto-populates with Remaining Time = 30 min (never resets to 60!)
+    fireEvent.click(screen.getByRole('button', { name: /add tool \/ part/i }));
+    const p2RunInput = document.getElementById('nc-p2-run');
+    expect(p2RunInput.value).toBe('30');
+    fireEvent.change(p2RunInput, { target: { value: '20' } });
+
+    // Add Part 3: Remaining Time = 60 - (30 + 20) = 10 min!
+    fireEvent.click(screen.getByRole('button', { name: /add tool \/ part/i }));
+    const p3RunInput = document.getElementById('nc-p3-run');
+    expect(p3RunInput.value).toBe('10');
+    expect(screen.getByRole('button', { name: /add tool \/ part/i })).toBeDisabled();
+
+    // Remove Part 3 cleanly to submit 2-part batch (30m + 20m)
+    fireEvent.click(screen.getByRole('button', { name: /remove part 3/i }));
     fireEvent.change(document.getElementById('nc-p2-tool'), { target: { value: '__OTHER__' } });
-    fireEvent.change(screen.getByLabelText(/Part 2 Tool Number \* manual entry/i), { target: { value: 'T002' } });
-
-    // Fill Part 2 UPH and Actual
-    const uphInputs = screen.getAllByPlaceholderText(/e\.g\. 800/i);
-    fireEvent.change(uphInputs[0], { target: { value: '800' } });
-    const actualInputs = screen.getAllByPlaceholderText(/enter produced pcs/i);
-    fireEvent.change(actualInputs[1], { target: { value: '650' } });
+    fireEvent.change(screen.getByLabelText(/Tool #2 \* manual entry/i), { target: { value: 'T002' } });
+    fireEvent.change(document.getElementById('nc-p2-uph'), { target: { value: '120' } });
+    fireEvent.change(document.getElementById('nc-p2-actual'), { target: { value: '2300' } });
 
     fireEvent.click(screen.getByRole('button', { name: /save hourly production/i }));
 
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(submitSpy.mock.calls[0][0].parts).toHaveLength(2);
-    expect(submitSpy.mock.calls[0][0].parts[0].actual_qty).toBe(1000);
-    expect(submitSpy.mock.calls[0][0].parts[1].actual_qty).toBe(650);
+    expect(submitSpy.mock.calls[0][0].parts[0].running_minutes).toBe(30);
+    expect(submitSpy.mock.calls[0][0].parts[0].actual_qty).toBe(3500);
+    expect(submitSpy.mock.calls[0][0].parts[1].running_minutes).toBe(20);
+    expect(submitSpy.mock.calls[0][0].parts[1].actual_qty).toBe(2300);
   });
 
   it('supports up to 4 simultaneous parts in TandemProductionView across all 6 lines', () => {
@@ -489,5 +521,122 @@ describe('UI Components & Multi-Part Workflows', () => {
       />
     );
     expect(screen.getByText(/Live Cell Status Display/i)).toBeInTheDocument();
+  });
+
+  it('supports Account & Password management (User ID + Password tabs) via cloudApi', async () => {
+    const chgUserSpy = vi.spyOn(cloudApi, 'changeUsername').mockResolvedValue({ success: true, username: 'shift_lead_1' });
+    const completedSpy = vi.fn();
+
+    render(
+      <PasswordModal
+        isOpen={true}
+        forced={false}
+        currentUser={{ role: ROLES.SUPERVISOR, username: 'supervisor', full_name: 'Shift Sup' }}
+        onClose={() => {}}
+        onCompleted={completedSpy}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: /change user id/i }));
+    fireEvent.change(screen.getByLabelText(/new user id/i), { target: { value: 'shift_lead_1' } });
+    fireEvent.change(screen.getByLabelText(/confirm current password/i), { target: { value: 'StrongSuper#2026' } });
+    fireEvent.click(screen.getByRole('button', { name: /update user id/i }));
+
+    await waitFor(() => expect(chgUserSpy).toHaveBeenCalledWith({
+      newUsername: 'shift_lead_1',
+      currentPassword: 'StrongSuper#2026',
+    }));
+    await waitFor(() => expect(completedSpy).toHaveBeenCalled());
+  });
+
+  it('enforces WhatsApp Reports RBAC, recipient validation, 6 report types (no payroll), and API dispatch', async () => {
+    // Operator role blocked from WhatsApp Reports
+    const { unmount } = render(
+      <WhatsAppReportsView
+        selectedDate="2026-11-27"
+        selectedShift="Shift A"
+        machines={[]}
+        tools={[]}
+        records={[]}
+        downtimes={[]}
+        currentUser={{ role: ROLES.OPERATOR, username: 'operator' }}
+      />
+    );
+    expect(screen.getByText(/access restricted/i)).toBeInTheDocument();
+    unmount();
+
+    expect(WHATSAPP_REPORT_TYPES).toHaveLength(6);
+    expect(normalizeWhatsAppPhone('+91 9876543210').valid).toBe(true);
+    expect(normalizeWhatsAppPhone('98765').valid).toBe(false);
+
+    const preview = generateWhatsAppReportText({
+      reportType: 'hourly',
+      date: '2026-11-27',
+      shift: 'Shift A',
+      machine: 'ALL',
+      tool: 'ALL',
+      records: [
+        { machine_or_line: 'P01075', date: '2026-11-27', shift: 'Shift A', hour_interval: 'Hour 1', tool_number: 'T001', uph: 120, running_minutes: 60, target_qty: 7200, actual_qty: 6900, rejected_qty: 20, downtime_minutes: 5 },
+      ],
+      machines: [],
+      downtimes: [],
+    });
+    expect(preview).toContain('P01075');
+    expect(preview).not.toMatch(/salary|wage|payroll/i);
+
+    vi.spyOn(cloudApi, 'getWhatsAppRecipients').mockResolvedValue([
+      { id: 1, name: 'Plant Head', phone_number: '+919876543210' },
+    ]);
+    vi.spyOn(cloudApi, 'getWhatsAppHistory').mockResolvedValue([]);
+    vi.spyOn(cloudApi, 'getWhatsAppStatus').mockResolvedValue({ configured: true, apiVersion: 'v21.0' });
+    vi.spyOn(cloudApi, 'getProductionRecords').mockResolvedValue([
+      { id: 5, machine_or_line: 'P01075', date: '2026-11-27', shift: 'Shift A', hour_interval: 'Hour 1', tool_number: 'T001', uph: 120, running_minutes: 60, target_qty: 7200, actual_qty: 6900, rejected_qty: 20, downtime_minutes: 5 },
+    ]);
+    const sendSpy = vi.spyOn(cloudApi, 'sendWhatsAppReport').mockResolvedValue({
+      ok: true,
+      sent_count: 1,
+      failed_count: 0,
+      results: [{ name: 'Plant Head', phone_number: '+919876543210', status: 'sent', message_id: 'wamid.123' }],
+    });
+
+    render(
+      <WhatsAppReportsView
+        selectedDate="2026-11-27"
+        selectedShift="Shift A"
+        machines={[{ machine_number: 'P01075', machine_type: 'NC' }]}
+        tools={[{ tool_number: 'T001' }]}
+        records={[]}
+        downtimes={[]}
+        currentUser={{ role: ROLES.SUPERVISOR, username: 'supervisor' }}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByText('Plant Head')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /send report via whatsapp api/i }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+    expect(sendSpy.mock.calls[0][0].recipients).toHaveLength(1);
+    expect(await screen.findByText(/Sent \(wamid\.123\)/i)).toBeInTheDocument();
+  });
+
+  it('requires confirmation dialog before deleting a production record in ReportsView (Admin only)', async () => {
+    const delSpy = vi.spyOn(cloudApi, 'deleteProductionRecord').mockResolvedValue({ success: true });
+    render(
+      <ReportsView
+        selectedPlant="Plant 1"
+        selectedDate="2026-11-27"
+        machines={[{ machine_number: 'P01075', machine_type: 'NC' }]}
+        records={[
+          { id: 77, plant_id: 'Plant 1', date: '2026-11-27', shift: 'Shift A', production_type: 'NC', machine_or_line: 'P01075', hour_interval: 'Hour 1', tool_number: 'T001', operator_name: 'SACHIN', uph: 120, target_qty: 7200, actual_qty: 7000, good_qty: 6990, rejected_qty: 10, downtime_minutes: 0 },
+        ]}
+        currentUser={{ role: ROLES.ADMIN, username: 'admin' }}
+        onRefresh={() => {}}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /delete production record 77/i }));
+    expect(screen.getByText(/Delete Production Record\?/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /confirm delete/i }));
+    await waitFor(() => expect(delSpy).toHaveBeenCalledWith(77));
   });
 });

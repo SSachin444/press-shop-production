@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { UserPlus, ShieldCheck, AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
+import { UserPlus, ShieldCheck, AlertCircle, RefreshCw, Edit3, X } from 'lucide-react';
 import { ROLES, getCapabilities } from '../config/roles';
 import { cloudApi } from '../services/cloudClient';
 
@@ -9,6 +9,10 @@ export default function UsersView({ currentUser }) {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState(null);
+
+  const [editUser, setEditUser] = useState(null);
+  const [editForm, setEditForm] = useState({ username: '', full_name: '', role: ROLES.SUPERVISOR, temp_password: '' });
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const [form, setForm] = useState({
     username: '',
@@ -245,14 +249,31 @@ export default function UsersView({ currentUser }) {
                       </span>
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        disabled={u.username === currentUser?.username}
-                        onClick={() => handleToggle(u)}
-                      >
-                        {u.is_active ? 'Disable' : 'Activate'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => {
+                            setEditUser(u);
+                            setEditForm({
+                              username: u.username || '',
+                              full_name: u.full_name || '',
+                              role: u.role || ROLES.SUPERVISOR,
+                              temp_password: '',
+                            });
+                          }}
+                        >
+                          <Edit3 size={13} /> Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          disabled={u.username === currentUser?.username}
+                          onClick={() => handleToggle(u)}
+                        >
+                          {u.is_active ? 'Disable' : 'Activate'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -261,6 +282,100 @@ export default function UsersView({ currentUser }) {
           </div>
         )}
       </section>
+
+      {editUser && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
+          <div className="modal-dialog" style={{ maxWidth: 460 }}>
+            <div className="modal-head">
+              <h3 id="edit-user-title" style={{ fontSize: '1rem', fontWeight: 700 }}>
+                Edit Account — {editUser.username}
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setEditUser(null)}>
+                <X size={15} />
+              </button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setSavingEdit(true);
+                setNotice(null);
+                try {
+                  await cloudApi.updateUserAccount(editUser.id, {
+                    username: editForm.username.trim().toLowerCase(),
+                    full_name: editForm.full_name.trim(),
+                    role: editForm.role,
+                    ...(editForm.temp_password.trim()
+                      ? { temp_password: editForm.temp_password.trim(), must_change_password: true }
+                      : {}),
+                  });
+                  setNotice({ type: 'ok', text: `Updated account ${editForm.username.trim().toLowerCase()}.` });
+                  setEditUser(null);
+                  await loadUsers();
+                } catch (err) {
+                  setNotice({ type: 'err', text: err.message || 'Unable to update user account.' });
+                } finally {
+                  setSavingEdit(false);
+                }
+              }}
+            >
+              <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="eu-username">User ID / Username</label>
+                  <input
+                    id="eu-username"
+                    type="text"
+                    className="field-input"
+                    value={editForm.username}
+                    onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="eu-name">Full Name</label>
+                  <input
+                    id="eu-name"
+                    type="text"
+                    className="field-input"
+                    value={editForm.full_name}
+                    onChange={(e) => setEditForm({ ...editForm, full_name: e.target.value })}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="eu-role">Role</label>
+                  <select
+                    id="eu-role"
+                    className="field-select"
+                    value={editForm.role}
+                    onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
+                  >
+                    <option value={ROLES.SUPERVISOR}>Supervisor</option>
+                    <option value={ROLES.ADMIN}>Admin</option>
+                  </select>
+                </div>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="eu-pw">Reset Temporary Password (Optional)</label>
+                  <input
+                    id="eu-pw"
+                    type="password"
+                    className="field-input"
+                    value={editForm.temp_password}
+                    onChange={(e) => setEditForm({ ...editForm, temp_password: e.target.value })}
+                    placeholder="Leave blank to keep existing password"
+                  />
+                </div>
+              </div>
+              <div className="modal-foot">
+                <button type="button" className="btn btn-secondary" onClick={() => setEditUser(null)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={savingEdit}>
+                  {savingEdit ? 'Saving...' : 'Save Account'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

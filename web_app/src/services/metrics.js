@@ -110,6 +110,27 @@ export function validatePhoneNumber(phone) {
   return { valid: true, normalized: clean };
 }
 
+export function normalizeWhatsAppPhone(phone) {
+  const raw = String(phone || '').trim();
+  if (!raw) return { valid: false, normalized: '', error: 'Mobile number is required.' };
+  const compact = raw.replace(/[\s\-()]/g, '');
+  if (!compact.startsWith('+')) {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'Include international country code starting with + (e.g. +91 9876543210 for India).',
+    };
+  }
+  if (!/^\+[1-9]\d{6,14}$/.test(compact)) {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'Enter a valid international WhatsApp number (e.g. +91 9876543210, 7-15 digits after +).',
+    };
+  }
+  return { valid: true, normalized: compact };
+}
+
 export function validateEmailAddress(email) {
   const clean = String(email || '').trim();
   if (!clean) return { valid: true, normalized: '' };
@@ -120,10 +141,86 @@ export function validateEmailAddress(email) {
   return { valid: true, normalized: clean.toLowerCase() };
 }
 
+/**
+ * Full 60-minute Hourly Target = Machine Speed (UPH) * 60.
+ */
+export function calculateFullHourTargetFromUph(uph) {
+  const u = Math.max(0, Number(uph) || 0);
+  return Math.round(u * 60);
+}
+
+/**
+ * Applicable Target for a tool running allocatedMinutes within the hour:
+ * Applicable Target = Machine Speed (UPH) * allocatedMinutes
+ * (When allocatedMinutes = 60, equals Machine Speed (UPH) * 60).
+ */
 export function calculateTargetFromUph(uph, runningMinutes = 60) {
   const u = Math.max(0, Number(uph) || 0);
   const mins = Math.max(0, Number(runningMinutes) || 0);
-  return Math.round(u * (mins / 60));
+  return Math.round(u * mins);
+}
+
+/**
+ * Computes sequential 60-minute time allocation & remaining available time
+ * across multiple tools entered for the same machine, date, shift, and hour.
+ */
+export function computeTimeAllocationSummary(parts = [], maxMinutes = 60) {
+  let cumulative = 0;
+  const perPart = (parts || []).map((p) => {
+    const rawMins = p?.running_minutes === '' || p?.running_minutes === undefined || p?.running_minutes === null
+      ? 0
+      : Number(p.running_minutes);
+    const allocated = Number.isFinite(rawMins) && rawMins > 0 ? rawMins : 0;
+    const availableBefore = Math.max(0, maxMinutes - cumulative);
+    cumulative += allocated;
+    const remainingAfter = Math.max(0, maxMinutes - cumulative);
+    return {
+      allocated,
+      availableBefore,
+      remainingAfter,
+      exceedsAvailable: cumulative > maxMinutes,
+    };
+  });
+  const totalAllocated = cumulative;
+  const remainingMinutes = Math.max(0, maxMinutes - totalAllocated);
+  return {
+    maxMinutes,
+    totalAllocated,
+    remainingMinutes,
+    isExceeded: totalAllocated > maxMinutes,
+    isZeroRemaining: remainingMinutes === 0,
+    perPart,
+  };
+}
+
+export function validateTimeAllocation(parts = [], maxMinutes = 60, enforcePool = true) {
+  let total = 0;
+  for (let i = 0; i < (parts || []).length; i++) {
+    const mins = Number(parts[i]?.running_minutes);
+    if (!Number.isFinite(mins) || mins <= 0 || mins > maxMinutes) {
+      return {
+        valid: false,
+        totalAllocated: total,
+        remainingMinutes: Math.max(0, maxMinutes - total),
+        error: `Tool #${i + 1}: Allocated time must be between 1 and ${maxMinutes} minutes.`,
+      };
+    }
+    total += mins;
+  }
+  if (enforcePool && total > maxMinutes) {
+    return {
+      valid: false,
+      totalAllocated: total,
+      remainingMinutes: 0,
+      error: `Total allocated time (${total} min) exceeds ${maxMinutes} available machine minutes in this hour.`,
+    };
+  }
+  return {
+    valid: true,
+    totalAllocated: total,
+    remainingMinutes: Math.max(0, maxMinutes - total),
+    error: '',
+  };
 }
 
 export function parseTimeToMinutes(hhmm) {
@@ -876,4 +973,248 @@ export function buildCsvDocument(columns, rows, summaryRow = null) {
     dataLines.push(columns.map((c) => escapeCsvCell(summaryRow[c.key] ?? '')).join(','));
   }
   return '\uFEFF' + [headerLine, ...dataLines].join('\r\n');
+}
+
+// ------------------------------------------------------------------
+// WHATSAPP REPORT TYPES & FORMATTERS (NO SALARY / PAYROLL DATA)
+// ------------------------------------------------------------------
+export const WHATSAPP_REPORT_TYPES = [
+  { id: 'hourly', label: '1. Hourly Production Report', description: 'Hour-by-hour entries with UPH, hourly target, actual output, scrap, downtime, and %.' },
+  { id: 'machine', label: '2. Machine-Wise Production Report', description: 'Machine performance summary across selected date, shift, or specific machine.' },
+  { id: 'tool', label: '3. Tool-Wise Production Report', description: 'Tool/Die output, machines used, scrap, and achievement %.' },
+  { id: 'downtime', label: '4. Downtime Report', description: 'Stoppages, downtime durations, codes, reasons, and affected machines.' },
+  { id: 'shift', label: '5. Shift Production Summary', description: 'Shift-level NC vs Tandem output, targets, scrap, downtime, and achievement %.' },
+  { id: 'combined', label: '6. Combined Production & Downtime Report', description: 'Complete plant production, machine & tool breakdown, and downtime overview.' },
+];
+
+export function generateWhatsAppReportText({
+  reportType = 'combined',
+  date = '',
+  shift = 'ALL',
+  machine = 'ALL',
+  tool = 'ALL',
+  records = [],
+  machines = [],
+  downtimes = [],
+}) {
+  const filtered = filterProductionRecords(records, {
+    plant: 'ALL',
+    date,
+    shift,
+    machineGroup: 'ALL',
+    machine: machine === 'ALL' ? '' : machine,
+    tool: tool === 'ALL' ? '' : tool,
+  });
+
+  const shiftLabel = shift === 'ALL' ? 'All Shifts' : shift;
+  const machLabel = machine === 'ALL' ? 'All Machines' : machine;
+  const toolLabel = tool === 'ALL' ? 'All Tools' : tool;
+  const headerLines = [
+    '*PHA INDIA — PRESS SHOP MFG-2*',
+    `Date: ${date || 'All Dates'} | Shift: ${shiftLabel}`,
+  ];
+
+  const metrics = computeProductionMetrics(records, machines, downtimes, {
+    plant: 'ALL',
+    date,
+    shift,
+    machineGroup: 'ALL',
+    machine: machine === 'ALL' ? '' : machine,
+    tool: tool === 'ALL' ? '' : tool,
+  });
+
+  if (reportType === 'hourly') {
+    const lines = [
+      ...headerLines,
+      '*HOURLY PRODUCTION REPORT*',
+      `Machine: ${machLabel} | Tool: ${toolLabel}`,
+      '--------------------------------',
+    ];
+    if (filtered.length === 0) {
+      lines.push('No hourly production entries recorded for the selected filters.');
+      return lines.join('\n');
+    }
+    const sorted = [...filtered].sort(
+      (a, b) =>
+        getHourSortOrder(a.hour_interval) - getHourSortOrder(b.hour_interval) ||
+        String(a.machine_or_line).localeCompare(String(b.machine_or_line)) ||
+        (a.part_index || 1) - (b.part_index || 1)
+    );
+    sorted.slice(0, 25).forEach((r) => {
+      const fullHrTarget = r.uph > 0 ? calculateFullHourTargetFromUph(r.uph) : r.target_qty;
+      lines.push(
+        `*${r.machine_or_line}* | ${r.hour_interval} (Part ${r.part_index || 1})`,
+        `  Operator: ${r.operator_name || '—'} | Tool: ${r.tool_number || '—'}`,
+        `  Speed: ${r.uph || 0} UPH | Hr Target: ${fullHrTarget.toLocaleString()} | Alloc: ${r.running_minutes}m (${r.target_qty.toLocaleString()})`,
+        `  Actual: ${r.actual_qty.toLocaleString()} | Scrap: ${r.rejected_qty} | Prod %: ${r.achievement_pct}%`
+      );
+      if (r.downtime_minutes > 0) {
+        lines.push(`  Downtime: ${r.downtime_minutes} min${r.downtime_reason ? ` (${r.downtime_reason})` : ''}`);
+      }
+    });
+    if (sorted.length > 25) {
+      lines.push(`...and ${sorted.length - 25} more hourly entry row(s).`);
+    }
+    lines.push(
+      '--------------------------------',
+      `Total Actual: ${metrics.totals.actual.toLocaleString()} pcs | Target: ${metrics.totals.target.toLocaleString()} pcs`,
+      `Scrap: ${metrics.totals.rejected.toLocaleString()} pcs | Downtime: ${metrics.totals.downtimeMinutes} min | Prod %: ${metrics.totals.achievementPct}%`
+    );
+    return lines.join('\n');
+  }
+
+  if (reportType === 'machine') {
+    const activeMachines = metrics.machines.filter(
+      (m) => (machine !== 'ALL' && m.machine_number === machine) || m.records_count > 0 || m.downtime > 0
+    );
+    const lines = [
+      ...headerLines,
+      '*MACHINE-WISE PRODUCTION REPORT*',
+      `Scope: ${machLabel}`,
+      '--------------------------------',
+    ];
+    if (activeMachines.length === 0) {
+      lines.push('No machine production records found for the selected filters.');
+      return lines.join('\n');
+    }
+    activeMachines.slice(0, 25).forEach((m) => {
+      lines.push(
+        `*${m.machine_number}* (${m.machine_type}) — ${m.status}`,
+        `  Operator: ${m.operator || '—'} | Tools: ${m.tool_number || '—'}`,
+        `  Actual: ${m.actual.toLocaleString()} / Target: ${m.target.toLocaleString()} (${m.achievement_pct}%)`,
+        `  Scrap: ${m.rejected.toLocaleString()} pcs | Downtime: ${m.downtime} min`
+      );
+    });
+    lines.push(
+      '--------------------------------',
+      `Total Output: ${metrics.totals.actual.toLocaleString()} / ${metrics.totals.target.toLocaleString()} (${metrics.totals.achievementPct}%)`,
+      `Total Scrap: ${metrics.totals.rejected.toLocaleString()} pcs | Total Downtime: ${metrics.totals.downtimeMinutes} min`
+    );
+    return lines.join('\n');
+  }
+
+  if (reportType === 'tool') {
+    const lines = [
+      ...headerLines,
+      '*TOOL-WISE PRODUCTION REPORT*',
+      `Tool Filter: ${toolLabel} | Machine: ${machLabel}`,
+      '--------------------------------',
+    ];
+    if (metrics.toolSummary.length === 0) {
+      lines.push('No tool production records found for the selected filters.');
+      return lines.join('\n');
+    }
+    metrics.toolSummary.slice(0, 25).forEach((t) => {
+      const usedOn = [...t.ncMachines, ...t.tandemLines].join(', ') || '—';
+      lines.push(
+        `*Tool ${t.tool_number}* (Machines: ${usedOn})`,
+        `  Actual: ${t.actual.toLocaleString()} / Target: ${t.target.toLocaleString()} (${t.achievementPct}%)`,
+        `  Scrap: ${t.rejected.toLocaleString()} pcs | Downtime: ${t.downtimeMinutes} min`
+      );
+    });
+    lines.push(
+      '--------------------------------',
+      `Combined Tool Output: ${metrics.totals.actual.toLocaleString()} pcs (${metrics.totals.achievementPct}%)`
+    );
+    return lines.join('\n');
+  }
+
+  if (reportType === 'downtime') {
+    const dtFiltered = (downtimes || []).filter((d) => {
+      if (date && d.date && d.date !== date) return false;
+      if (shift !== 'ALL' && d.shift && d.shift !== shift) return false;
+      if (machine !== 'ALL' && String(d.machine_number || '').toUpperCase() !== machine.toUpperCase()) return false;
+      return true;
+    });
+    const lines = [
+      ...headerLines,
+      '*DOWNTIME REPORT*',
+      `Machine: ${machLabel}`,
+      '--------------------------------',
+    ];
+    if (metrics.downtimeByReason.length === 0 && dtFiltered.length === 0) {
+      lines.push('Zero downtime events recorded for the selected filters.');
+      return lines.join('\n');
+    }
+    if (metrics.downtimeByReason.length > 0) {
+      lines.push('*By Reason:*');
+      metrics.downtimeByReason.forEach((d) => {
+        lines.push(`- ${d.code} ${d.reason}: ${d.minutes} min (${d.count}x, ${d.pct}%)`);
+      });
+    }
+    const { slotDowntimes } = deduplicateSlotDowntime(filtered);
+    const machineDtRows = [];
+    slotDowntimes.forEach((val, key) => {
+      if (val.minutes > 0) {
+        const [, s, mName, hr] = key.split('|');
+        const reasons = (val.problems || []).map((p) => `${p.downtime_reason || p.reason} (${p.duration_minutes}m)`).join(', ');
+        machineDtRows.push(`- *${mName}* (${s}, ${hr}): ${val.minutes} min — ${reasons}`);
+      }
+    });
+    if (machineDtRows.length > 0) {
+      lines.push('', '*Machine Downtime Details:*', ...machineDtRows.slice(0, 20));
+    }
+    if (dtFiltered.filter((d) => d.status === 'Open').length > 0) {
+      lines.push('', '*Open Breakdowns:*');
+      dtFiltered
+        .filter((d) => d.status === 'Open')
+        .slice(0, 10)
+        .forEach((d) => {
+          lines.push(`- *${d.machine_number}* (${d.downtime_code || 'D01'}): ${d.reason || 'Breakdown'} [OPEN]`);
+        });
+    }
+    lines.push('--------------------------------', `Total Downtime: ${metrics.totals.downtimeMinutes} min (${metrics.totals.machinesAffected} machine(s) affected)`);
+    return lines.join('\n');
+  }
+
+  if (reportType === 'shift') {
+    const lines = [
+      ...headerLines,
+      '*SHIFT PRODUCTION SUMMARY*',
+      `Machine Filter: ${machLabel}`,
+      '--------------------------------',
+      `NC Presses: ${metrics.ncTotals.actual.toLocaleString()} / ${metrics.ncTotals.target.toLocaleString()} (${metrics.ncTotals.achievementPct}%)`,
+      `Tandem Lines: ${metrics.tandemTotals.actual.toLocaleString()} / ${metrics.tandemTotals.target.toLocaleString()} (${metrics.tandemTotals.achievementPct}%)`,
+      `Total Actual: ${metrics.totals.actual.toLocaleString()} pcs`,
+      `Total Target: ${metrics.totals.target.toLocaleString()} pcs`,
+      `Production %: ${metrics.totals.achievementPct}%`,
+      `Good Output: ${metrics.totals.good.toLocaleString()} pcs`,
+      `Scrap Qty: ${metrics.totals.rejected.toLocaleString()} pcs (${metrics.totals.scrapPct}%)`,
+      `Downtime: ${metrics.totals.downtimeMinutes} min (${metrics.totals.problemCount} issue(s))`,
+    ];
+    if (shift === 'ALL' && metrics.shiftBreakdown.length > 0) {
+      lines.push('--------------------------------', '*Shift Breakdown:*');
+      metrics.shiftBreakdown.forEach((s) => {
+        lines.push(`- ${s.id}: ${s.actual.toLocaleString()} / ${s.target.toLocaleString()} (${s.achievementPct}%), Scrap ${s.rejected}, DT ${s.downtimeMinutes}m`);
+      });
+    }
+    return lines.join('\n');
+  }
+
+  // Combined Production and Downtime Report
+  const activeMachines = metrics.machines.filter((m) => m.records_count > 0 || m.downtime > 0);
+  const lines = [
+    ...headerLines,
+    '*COMBINED PRODUCTION & DOWNTIME REPORT*',
+    `Machine: ${machLabel} | Tool: ${toolLabel}`,
+    '--------------------------------',
+    `Total Production: ${metrics.totals.actual.toLocaleString()} / ${metrics.totals.target.toLocaleString()} pcs (${metrics.totals.achievementPct}%)`,
+    `NC Presses: ${metrics.ncTotals.actual.toLocaleString()} pcs (${metrics.ncTotals.achievementPct}%)`,
+    `Tandem Lines: ${metrics.tandemTotals.actual.toLocaleString()} pcs (${metrics.tandemTotals.achievementPct}%)`,
+    `Good Qty: ${metrics.totals.good.toLocaleString()} pcs | Scrap Qty: ${metrics.totals.rejected.toLocaleString()} pcs`,
+    `Total Downtime: ${metrics.totals.downtimeMinutes} min across ${metrics.totals.machinesAffected} machine(s)`,
+  ];
+  if (activeMachines.length > 0) {
+    lines.push('--------------------------------', '*Machine Summary:*');
+    activeMachines.slice(0, 15).forEach((m) => {
+      lines.push(`- ${m.machine_number}: ${m.actual.toLocaleString()}/${m.target.toLocaleString()} (${m.achievement_pct}%), Scrap ${m.rejected}, DT ${m.downtime}m`);
+    });
+  }
+  if (metrics.downtimeByReason.length > 0) {
+    lines.push('--------------------------------', '*Downtime Breakdown:*');
+    metrics.downtimeByReason.slice(0, 8).forEach((d) => {
+      lines.push(`- ${d.code} ${d.reason}: ${d.minutes} min (${d.count}x)`);
+    });
+  }
+  return lines.join('\n');
 }

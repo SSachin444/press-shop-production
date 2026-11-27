@@ -24,6 +24,8 @@ import {
   GitBranch,
   Wrench,
   BarChart3,
+  Send,
+  UserCog as UserAccountIcon,
 } from 'lucide-react';
 import { getAllowedRoutes, getCapabilities, getRouteByTab } from '../config/roles';
 import LiveClock from './LiveClock';
@@ -41,6 +43,7 @@ const NAV_ICONS = {
   machines: Cpu,
   handovers: MessageSquare,
   reports: FileSpreadsheet,
+  'whatsapp-reports': Send,
   users: UserCog,
   'activity-logs': ShieldCheck,
   settings: Settings,
@@ -108,7 +111,7 @@ export default function AppShell({
             </div>
             <div>
               <div className="brand-kicker" style={{ fontSize: '0.62rem' }}>PHA INDIA</div>
-              <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--ink-primary)' }}>
+              <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#ffffff' }}>
                 PRESS SHOP MFG-2
               </div>
             </div>
@@ -220,24 +223,38 @@ export default function AppShell({
                     <div style={{ fontSize: '0.84rem', fontWeight: 700, color: 'var(--ink-primary)' }}>
                       {currentUser?.full_name}
                     </div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
-                      Active role: {currentUser?.role}
+                    <div style={{ fontSize: '0.74rem', color: 'var(--ink-muted)' }}>
+                      User ID: <span className="mono">{currentUser?.username}</span> · {currentUser?.role}
                     </div>
                   </div>
 
                   {caps.canChangeOwnPassword && (
-                    <button
-                      type="button"
-                      className="popover-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        onOpenChangePassword();
-                      }}
-                    >
-                      <Lock size={15} aria-hidden="true" />
-                      <span>Change Password</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="popover-item"
+                        role="menuitem"
+                        onClick={() => {
+                          setUserMenuOpen(false);
+                          onOpenChangePassword('password');
+                        }}
+                      >
+                        <Lock size={15} aria-hidden="true" />
+                        <span>Change Password</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="popover-item"
+                        role="menuitem"
+                        onClick={() => {
+                          setUserMenuOpen(false);
+                          onOpenChangePassword('username');
+                        }}
+                      >
+                        <UserAccountIcon size={15} aria-hidden="true" />
+                        <span>Change User ID</span>
+                      </button>
+                    </>
                   )}
 
                   <button

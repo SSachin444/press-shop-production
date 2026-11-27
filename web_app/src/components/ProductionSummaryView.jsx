@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Cpu, Wrench, RefreshCw, Search, Layers } from 'lucide-react';
+import { Cpu, Wrench, RefreshCw, Search, Layers, Trash2, ShieldAlert, X, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { getCapabilities } from '../config/roles';
 import { cloudApi } from '../services/cloudClient';
 import {
   SHIFTS,
@@ -17,7 +18,10 @@ export default function ProductionSummaryView({
   tools = [],
   records = [],
   downtimes = [],
+  currentUser = null,
+  onReload = null,
 }) {
+  const caps = getCapabilities(currentUser?.role);
   const [trackingMode, setTrackingMode] = useState('machine'); // 'machine' | 'tool'
   const [fromDate, setFromDate] = useState(selectedDate);
   const [toDate, setToDate] = useState(selectedDate);
@@ -29,6 +33,10 @@ export default function ProductionSummaryView({
 
   const [rangeRecords, setRangeRecords] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null); // { mode: 'record' | 'slot', record?, group? }
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const loadRangeRecords = async () => {
     setLoading(true);
@@ -490,6 +498,18 @@ export default function ProductionSummaryView({
                         <span className={`status-pill tabular ${grp.downtimeMinutes > 0 ? 'is-warn' : ''}`}>
                           DT: {grp.downtimeMinutes}m ({grp.problemCount} prob)
                         </span>
+                        {caps.canDeleteProduction && (
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => {
+                              setDeleteError('');
+                              setDeleteTarget({ mode: 'slot', group: grp });
+                            }}
+                          >
+                            <Trash2 size={13} /> Delete Hour
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -506,6 +526,7 @@ export default function ProductionSummaryView({
                             <th>Part Ach %</th>
                             <th>Scrap</th>
                             <th>Scrap Reasons</th>
+                            {caps.canDeleteProduction && <th>Action</th>}
                           </tr>
                         </thead>
                         <tbody>
@@ -524,6 +545,25 @@ export default function ProductionSummaryView({
                                   ? pt.scrap_breakdown.map((sb) => `${sb.reason_name}: ${sb.qty}`).join(', ')
                                   : '—'}
                               </td>
+                              {caps.canDeleteProduction && (
+                                <td>
+                                  {pt.id ? (
+                                    <button
+                                      type="button"
+                                      className="btn btn-danger btn-sm"
+                                      aria-label={`Delete part ${pt.part_index} record`}
+                                      onClick={() => {
+                                        setDeleteError('');
+                                        setDeleteTarget({ mode: 'record', record: pt });
+                                      }}
+                                    >
+                                      <Trash2 size={12} />
+                                    </button>
+                                  ) : (
+                                    '—'
+                                  )}
+                                </td>
+                              )}
                             </tr>
                           ))}
                           {grp.parts.length > 1 && (
@@ -533,7 +573,7 @@ export default function ProductionSummaryView({
                               <td className="tabular">{grp.totalActual.toLocaleString()}</td>
                               <td className="tabular">{grp.achievementPct}%</td>
                               <td className="tabular">{grp.totalScrap}</td>
-                              <td className="tabular">DT: {grp.downtimeMinutes}m</td>
+                              <td className="tabular" colSpan={caps.canDeleteProduction ? 2 : 1}>DT: {grp.downtimeMinutes}m</td>
                             </tr>
                           )}
                         </tbody>
@@ -663,6 +703,7 @@ export default function ProductionSummaryView({
                     <th>Ach %</th>
                     <th>Scrap</th>
                     <th>Downtime</th>
+                    {caps.canDeleteProduction && <th>Action</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -704,6 +745,25 @@ export default function ProductionSummaryView({
                       <td className="tabular">{r.achievement_pct}%</td>
                       <td className="tabular">{r.rejected_qty.toLocaleString()}</td>
                       <td className="tabular">{r.downtime_minutes}m</td>
+                      {caps.canDeleteProduction && (
+                        <td>
+                          {r.id ? (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              aria-label={`Delete tool record ${r.id}`}
+                              onClick={() => {
+                                setDeleteError('');
+                                setDeleteTarget({ mode: 'record', record: r });
+                              }}
+                            >
+                              <Trash2 size={12} /> Delete
+                            </button>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -711,6 +771,95 @@ export default function ProductionSummaryView({
             </div>
           )}
         </section>
+      )}
+
+      {notice && (
+        <div className={`banner ${notice.type === 'ok' ? 'is-ok' : 'is-err'}`} role={notice.type === 'err' ? 'alert' : 'status'}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {notice.type === 'ok' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+            {notice.message}
+          </span>
+        </div>
+      )}
+
+      {deleteTarget && caps.canDeleteProduction && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="sum-del-title">
+          <div className="modal-dialog" style={{ maxWidth: 440 }}>
+            <div className="modal-head">
+              <h3 id="sum-del-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                {deleteTarget.mode === 'slot' ? 'Delete Full Hourly Entry?' : 'Delete Production Record?'}
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {deleteError && (
+                <div className="banner is-err" role="alert">
+                  <span>{deleteError}</span>
+                </div>
+              )}
+              {deleteTarget.mode === 'slot' ? (
+                <p>
+                  Remove all part entries for machine <strong className="mono">{selectedMachine}</strong> on{' '}
+                  <strong className="tabular">{deleteTarget.group.date}</strong> ({deleteTarget.group.shift},{' '}
+                  <strong>{deleteTarget.group.hour_interval}</strong> — {deleteTarget.group.parts.length} part row(s))?
+                </p>
+              ) : (
+                <p>
+                  Remove record <strong className="mono">#{deleteTarget.record.id}</strong> (Machine{' '}
+                  <strong className="mono">{deleteTarget.record.machine_or_line}</strong>, Tool{' '}
+                  <strong className="mono">{deleteTarget.record.tool_number}</strong>, Actual{' '}
+                  <strong className="tabular">{deleteTarget.record.actual_qty}</strong>)?
+                </p>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError('');
+                  try {
+                    if (deleteTarget.mode === 'slot') {
+                      await cloudApi.deleteHourlyProductionSlot({
+                        date: deleteTarget.group.date,
+                        shift: deleteTarget.group.shift,
+                        machine_or_line: selectedMachine,
+                        hour_interval: deleteTarget.group.hour_interval,
+                      });
+                      setNotice({
+                        type: 'ok',
+                        message: `Deleted hourly entry for ${selectedMachine} (${deleteTarget.group.hour_interval}).`,
+                      });
+                    } else {
+                      await cloudApi.deleteProductionRecord(deleteTarget.record.id);
+                      setNotice({
+                        type: 'ok',
+                        message: `Deleted production record #${deleteTarget.record.id}.`,
+                      });
+                    }
+                    setDeleteTarget(null);
+                    await loadRangeRecords();
+                    if (onReload) await onReload();
+                  } catch (err) {
+                    setDeleteError(err?.message || 'Unable to delete entry.');
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

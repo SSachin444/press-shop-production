@@ -1,27 +1,42 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { GitBranch, Plus, Trash2, Save, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import {
+  GitBranch,
+  Plus,
+  Trash2,
+  Save,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  Clock,
+  ShieldAlert,
+  X,
+} from 'lucide-react';
+import { getCapabilities } from '../config/roles';
 import {
   HOUR_SLOTS,
   SHIFTS,
   TANDEM_LINES,
+  calculateFullHourTargetFromUph,
   calculateTargetFromUph,
   computeProductionMetrics,
+  computeTimeAllocationSummary,
   getAchievementTone,
   groupHourlyMachineEntries,
   validateDowntimeProblems,
   validateScrapReasons,
+  validateTimeAllocation,
 } from '../services/metrics';
 import { cloudApi } from '../services/cloudClient';
 import { createSubmissionId } from '../services/syncQueue';
 import { DowntimeProblemsPanel, ScrapSectionPanel, ToolSelectorField } from './ProductionEntryParts';
 import CircularGauge from './CircularGauge';
 
-function createEmptyTandemPart() {
+function createEmptyTandemPart(defaultMinutes = '60') {
   return {
     tool_number: '',
     part_name: '',
     uph: '',
-    running_minutes: '60',
+    running_minutes: String(defaultMinutes),
     actual_qty: '',
     rejected_qty: '',
     scrap_breakdown: [],
@@ -42,6 +57,8 @@ export default function TandemProductionView({
   currentUser,
   onEntrySaved,
 }) {
+  const caps = getCapabilities(currentUser?.role);
+
   // Combine machine directory Tandem lines with canonical 6 lines (LP-1, LP-2, HP-1, HP-2, HP-3, HP-4)
   const tandemLines = useMemo(() => {
     const dirTandem = (machines || []).filter((m) => m.machine_type === 'Tandem');
@@ -63,10 +80,11 @@ export default function TandemProductionView({
 
   const [selectedLine, setSelectedLine] = useState('LP-1');
   const [selectedHour, setSelectedHour] = useState(HOUR_SLOTS[0].label);
+  const [allocationMode, setAllocationMode] = useState('simultaneous'); // 'simultaneous' | 'sequential'
   const [operatorName, setOperatorName] = useState(
     currentUser?.role === 'Operator' ? currentUser.full_name || '' : ''
   );
-  const [parts, setParts] = useState([createEmptyTandemPart()]);
+  const [parts, setParts] = useState([createEmptyTandemPart('60')]);
   const [downtimeProblems, setDowntimeProblems] = useState([]);
   const [remarks, setRemarks] = useState('');
 
@@ -74,6 +92,8 @@ export default function TandemProductionView({
   const [syncStatus, setSyncStatus] = useState({ state: 'idle', message: '' });
   const [pendingSubmissionId, setPendingSubmissionId] = useState(() => createSubmissionId());
   const [lastPayload, setLastPayload] = useState(null);
+  const [deleteSlotTarget, setDeleteSlotTarget] = useState(null);
+  const [deletingSlot, setDeletingSlot] = useState(false);
 
   useEffect(() => {
     cloudApi
@@ -131,10 +151,14 @@ export default function TandemProductionView({
           scrap_breakdown: Array.isArray(p.scrap_breakdown) ? p.scrap_breakdown : [],
         }))
       );
+      const loadedSum = sorted.reduce((s, p) => s + (Number(p.running_minutes) || 60), 0);
+      if (sorted.length > 1 && loadedSum <= 60) {
+        setAllocationMode('sequential');
+      }
       setDowntimeProblems(sorted[0].downtime_problems || []);
       setRemarks(sorted[0].remarks || '');
     } else {
-      setParts([createEmptyTandemPart()]);
+      setParts([createEmptyTandemPart('60')]);
       setDowntimeProblems([]);
       setRemarks('');
     }
@@ -143,13 +167,27 @@ export default function TandemProductionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLine, selectedHour, selectedDate, selectedShift]);
 
+  const timePool = useMemo(() => computeTimeAllocationSummary(parts, 60), [parts]);
+  const isSequentialMode = allocationMode === 'sequential';
+
   const updatePart = (idx, patch) => {
     setParts((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
   };
 
   const handleAddPart = () => {
     if (parts.length >= 4) return;
-    setParts((prev) => [...prev, createEmptyTandemPart()]);
+    if (isSequentialMode) {
+      if (timePool.remainingMinutes <= 0) {
+        setSyncStatus({
+          state: 'failed',
+          message: 'Remaining available time in this 60-minute hour is 0 minutes. Reduce an existing tool’s minutes first.',
+        });
+        return;
+      }
+      setParts((prev) => [...prev, createEmptyTandemPart(String(timePool.remainingMinutes))]);
+    } else {
+      setParts((prev) => [...prev, createEmptyTandemPart('60')]);
+    }
   };
 
   const handleRemovePart = (idx) => {
@@ -165,7 +203,8 @@ export default function TandemProductionView({
 
     const partMetrics = parts.map((p) => {
       const uph = Number(p.uph) || 0;
-      const runMin = Number(p.running_minutes) || 60;
+      const runMin = p.running_minutes === '' ? 60 : Number(p.running_minutes) || 0;
+      const fullHourTarget = calculateFullHourTargetFromUph(uph);
       const target = calculateTargetFromUph(uph, runMin);
       const actual = Number(p.actual_qty) || 0;
       const scrap = Number(p.rejected_qty) || 0;
@@ -174,7 +213,7 @@ export default function TandemProductionView({
       totalActual += actual;
       totalTarget += target;
       totalScrap += scrap;
-      return { target, actual, scrap, good, pct };
+      return { fullHourTarget, target, runMin, actual, scrap, good, pct };
     });
 
     const totalGood = Math.max(0, totalActual - totalScrap);
@@ -196,6 +235,11 @@ export default function TandemProductionView({
     if (!operatorName.trim()) return { error: 'Operator name is required.' };
     if (!selectedLine) return { error: 'Select a Tandem line.' };
 
+    if (isSequentialMode) {
+      const timeCheck = validateTimeAllocation(parts, 60, true);
+      if (!timeCheck.valid) return { error: timeCheck.error };
+    }
+
     const dtCheck = validateDowntimeProblems(downtimeProblems, 5, 60);
     if (!dtCheck.valid) return { error: dtCheck.error };
 
@@ -212,7 +256,7 @@ export default function TandemProductionView({
         return { error: `Part ${num}: Tool Number is required.` };
       }
       if (!Number.isFinite(uph) || uph <= 0 || uph > 50000) {
-        return { error: `Part ${num}: Enter a valid UPH rate greater than 0.` };
+        return { error: `Part ${num}: Enter a valid Machine Speed (UPH) greater than 0.` };
       }
       if (!Number.isFinite(runMin) || runMin <= 0 || runMin > 60) {
         return { error: `Part ${num}: Running duration must be between 1 and 60 minutes.` };
@@ -243,6 +287,7 @@ export default function TandemProductionView({
     return {
       payload: {
         isBatch: true,
+        tandem_mode: allocationMode,
         client_submission_id: pendingSubmissionId,
         plant_id: selectedPlant,
         production_type: 'Tandem',
@@ -261,16 +306,16 @@ export default function TandemProductionView({
   };
 
   const executeSubmit = async (payloadToSend) => {
-    setSyncStatus({ state: 'saving', message: 'Saving simultaneous Tandem parts to cloud...' });
+    setSyncStatus({ state: 'saving', message: 'Saving Tandem line parts to cloud...' });
     try {
       await cloudApi.submitProductionBatch(payloadToSend);
       setSyncStatus({
         state: 'saved',
-        message: `Saved ${payloadToSend.machine_or_line} (${payloadToSend.hour_interval}): ${payloadToSend.parts.length} simultaneous part(s), ${summary.totalActual.toLocaleString()} pcs total.`,
+        message: `Saved ${payloadToSend.machine_or_line} (${payloadToSend.hour_interval}): ${payloadToSend.parts.length} part(s), ${summary.totalActual.toLocaleString()} pcs total.`,
       });
       setPendingSubmissionId(createSubmissionId());
       setLastPayload(null);
-      if (onEntrySaved) onEntrySaved();
+      if (onEntrySaved) await onEntrySaved();
     } catch (err) {
       setLastPayload(payloadToSend);
       if (err.isOffline || (typeof navigator !== 'undefined' && !navigator.onLine)) {
@@ -298,55 +343,71 @@ export default function TandemProductionView({
     await executeSubmit(payload);
   };
 
+  const handleConfirmDeleteSlot = async () => {
+    if (!deleteSlotTarget || !caps.canDeleteProduction) return;
+    setDeletingSlot(true);
+    try {
+      await cloudApi.deleteHourlyProductionSlot({
+        date: selectedDate,
+        shift: selectedShift,
+        machine_or_line: selectedLine,
+        hour_interval: deleteSlotTarget.hour_interval,
+      });
+      setSyncStatus({
+        state: 'saved',
+        message: `Deleted Tandem hourly entry for ${selectedLine} (${deleteSlotTarget.hour_interval}).`,
+      });
+      if (deleteSlotTarget.hour_interval === selectedHour) {
+        setParts([createEmptyTandemPart('60')]);
+        setDowntimeProblems([]);
+        setRemarks('');
+      }
+      setDeleteSlotTarget(null);
+      if (onEntrySaved) await onEntrySaved();
+    } catch (err) {
+      setSyncStatus({ state: 'failed', message: err?.message || 'Unable to delete Tandem hourly entry.' });
+      setDeleteSlotTarget(null);
+    } finally {
+      setDeletingSlot(false);
+    }
+  };
+
+  const selectedLineMetrics =
+    tandemMetrics.machines.find((m) => m.machine_number === selectedLine) || {
+      actual: 0,
+      target: 0,
+      good: 0,
+      rejected: 0,
+      achievement_pct: 0,
+      downtime_minutes: 0,
+    };
+
   const tone = getAchievementTone(summary.combinedPct, summary.totalTarget);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Total Tandem Production Strip */}
-      <div className="kpi-grid-4">
-        <div className="kpi-box is-orange-accent" style={{ cursor: 'default' }}>
-          <span className="kpi-label">Total Tandem Production</span>
-          <div className="kpi-number tabular">{tandemMetrics.totals.actual.toLocaleString()} <span className="kpi-unit">pcs</span></div>
-          <span className="kpi-comparison">Target: {tandemMetrics.totals.target.toLocaleString()} pcs ({selectedShift})</span>
-        </div>
-        <div className="kpi-box is-green-accent" style={{ cursor: 'default' }}>
-          <span className="kpi-label">Tandem Achievement</span>
-          <div className="kpi-number tabular" style={{ color: 'var(--status-ok)' }}>{tandemMetrics.totals.achievementPct}%</div>
-          <span className="kpi-comparison">Across all 6 Tandem lines</span>
-        </div>
-        <div className="kpi-box" style={{ cursor: 'default' }}>
-          <span className="kpi-label">Good Parts &amp; Scrap</span>
-          <div className="kpi-number tabular">{tandemMetrics.totals.good.toLocaleString()} <span className="kpi-unit">good</span></div>
-          <span className="kpi-comparison">Scrap: {tandemMetrics.totals.rejected.toLocaleString()} pcs ({tandemMetrics.totals.scrapPct}%)</span>
-        </div>
-        <div className="kpi-box" style={{ cursor: 'default' }}>
-          <span className="kpi-label">Tandem Downtime</span>
-          <div className="kpi-number tabular">{tandemMetrics.totals.downtimeMinutes} <span className="kpi-unit">min</span></div>
-          <span className="kpi-comparison">Problems logged: {tandemMetrics.totals.problemCount}</span>
-        </div>
-      </div>
-
-      {/* 6 Tandem Lines Selector Cards */}
+      {/* Dedicated Tandem Line Live Overview Cards */}
       <section className="surface-card">
         <div className="section-header">
           <div>
             <h2 className="section-title" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <GitBranch size={17} style={{ color: 'var(--accent)' }} />
-              6 Tandem Production Lines (Click Line to Enter Production)
+              <GitBranch size={17} style={{ color: 'var(--orange)' }} />
+              Tandem Production Lines (LP-1 to LP-2 &amp; HP-1 to HP-4)
             </h2>
-            <p className="section-subtitle">LP-1, LP-2, HP-1, HP-2, HP-3, HP-4 — each line supports up to 4 simultaneous parts per hour</p>
+            <p className="section-subtitle">
+              Dedicated multi-part press lines ({selectedDate} • {selectedShift === 'ALL' ? 'All Shifts' : selectedShift})
+            </p>
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <CircularGauge
-              size={64}
-              strokeWidth={7}
-              value={tandemMetrics.totals.achievementPct}
-              target={tandemMetrics.totals.target}
-            />
-          </div>
+          <CircularGauge
+            value={tandemMetrics.totals.achievementPct}
+            target={tandemMetrics.totals.target}
+            label="All Tandem Lines"
+            size={84}
+            strokeWidth={8}
+          />
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 10 }}>
           {tandemMetrics.machines.map((line) => {
             const isSelected = line.machine_number === selectedLine;
             const lTone = getAchievementTone(line.achievement_pct, line.target);
@@ -374,7 +435,7 @@ export default function TandemProductionView({
                   </span>
                   <span
                     className={`status-pill tabular ${
-                      lTone === 'green' ? 'is-ok' : lTone === 'orange' ? 'is-warn' : lTone === 'red' ? 'is-err' : ''
+                      lTone === 'green' ? 'is-ok' : lTone === 'orange' ? 'is-orange' : lTone === 'red' ? 'is-err' : ''
                     }`}
                   >
                     {line.target > 0 ? `${line.achievement_pct}%` : '—'}
@@ -386,33 +447,52 @@ export default function TandemProductionView({
         </div>
       </section>
 
-      {/* Multi-Part Simultaneous Entry Interface (Up to 4 Parts) */}
+      {/* Multi-Part Simultaneous / Sequential Entry Interface (Up to 4 Parts) */}
       <section className="surface-card" aria-labelledby="tandem-form-heading">
         <div className="section-header">
           <div>
             <h2 id="tandem-form-heading" className="section-title">
-              {selectedLine} — Simultaneous Multi-Part Hourly Entry (Max 4 Parts)
+              {selectedLine} — Multi-Part Hourly Entry (Max 4 Parts)
             </h2>
             <p className="section-subtitle">
-              Add up to 4 parts running simultaneously on {selectedLine} during {selectedHour}.
+              Hourly Target = Machine Speed (UPH) × 60 • Applicable Target = Machine Speed (UPH) × Allocated Minutes ({selectedLineMetrics.actual.toLocaleString()} pcs logged on line today).
             </p>
           </div>
-          {syncStatus.state !== 'idle' && (
-            <span
-              className={`status-pill ${
-                syncStatus.state === 'saved'
-                  ? 'is-ok'
-                  : syncStatus.state === 'saving' || syncStatus.state === 'offline'
-                  ? 'is-warn'
-                  : 'is-err'
-              }`}
-            >
-              {syncStatus.state === 'saving' && 'Saving...'}
-              {syncStatus.state === 'saved' && 'Saved'}
-              {syncStatus.state === 'offline' && 'Offline (Queued)'}
-              {syncStatus.state === 'failed' && 'Failed'}
-            </span>
-          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div className="tab-strip">
+              <button
+                type="button"
+                className={`btn btn-sm ${allocationMode === 'simultaneous' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setAllocationMode('simultaneous')}
+              >
+                Simultaneous Dies (Transfer)
+              </button>
+              <button
+                type="button"
+                className={`btn btn-sm ${allocationMode === 'sequential' ? 'btn-orange' : 'btn-secondary'}`}
+                onClick={() => setAllocationMode('sequential')}
+              >
+                Sequential Changeover (60m Pool)
+              </button>
+            </div>
+
+            {syncStatus.state !== 'idle' && (
+              <span
+                className={`status-pill ${
+                  syncStatus.state === 'saved'
+                    ? 'is-ok'
+                    : syncStatus.state === 'saving' || syncStatus.state === 'offline'
+                    ? 'is-warn'
+                    : 'is-err'
+                }`}
+              >
+                {syncStatus.state === 'saving' && 'Saving...'}
+                {syncStatus.state === 'saved' && 'Saved'}
+                {syncStatus.state === 'offline' && 'Offline (Queued)'}
+                {syncStatus.state === 'failed' && 'Failed'}
+              </span>
+            )}
+          </div>
         </div>
 
         {syncStatus.message && (
@@ -440,108 +520,131 @@ export default function TandemProductionView({
           </div>
         )}
 
-        <form onSubmit={handleSubmit} noValidate>
-          <div className="filter-bar" style={{ marginBottom: 14 }}>
-            <div className="field-group">
-              <label className="field-label" htmlFor="tan-date">Date *</label>
-              <input
-                id="tan-date"
-                type="date"
-                className="field-input tabular"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-              />
+        <form onSubmit={handleSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <div className="zone-panel zone-orange">
+              <div className="zone-header">
+                <span className="zone-title">Date, Shift &amp; Hour</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="tan-date">Date *</label>
+                  <input
+                    id="tan-date"
+                    type="date"
+                    className="field-input tabular"
+                    value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                  />
+                </div>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="tan-shift">Shift *</label>
+                  <select
+                    id="tan-shift"
+                    className="field-select"
+                    value={selectedShift}
+                    onChange={(e) => setSelectedShift(e.target.value)}
+                  >
+                    {SHIFTS.map((s) => (
+                      <option key={s.id} value={s.id}>{s.id}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="tan-hour">Hour *</label>
+                  <select
+                    id="tan-hour"
+                    className="field-select"
+                    value={selectedHour}
+                    onChange={(e) => setSelectedHour(e.target.value)}
+                  >
+                    {HOUR_SLOTS.map((h) => (
+                      <option key={h.key} value={h.label}>{h.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
 
-            <div className="field-group">
-              <label className="field-label" htmlFor="tan-shift">Shift *</label>
-              <select
-                id="tan-shift"
-                className="field-select"
-                value={selectedShift}
-                onChange={(e) => setSelectedShift(e.target.value)}
-              >
-                {SHIFTS.map((s) => (
-                  <option key={s.id} value={s.id}>{s.id}</option>
-                ))}
-              </select>
-            </div>
+            <div className="zone-panel zone-blue">
+              <div className="zone-header">
+                <span className="zone-title">Tandem Line &amp; Operator</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="tan-operator">Operator *</label>
+                  <select
+                    id="tan-operator"
+                    className="field-select"
+                    value={roster.some((op) => op.name === operatorName) ? operatorName : operatorName ? '__CUSTOM__' : ''}
+                    onChange={(e) => {
+                      if (e.target.value === '__CUSTOM__') setOperatorName('');
+                      else setOperatorName(e.target.value);
+                    }}
+                  >
+                    <option value="">-- Select Operator --</option>
+                    {roster.map((op) => (
+                      <option key={op.emp_id} value={op.name}>{op.name} ({op.emp_id})</option>
+                    ))}
+                    <option value="__CUSTOM__">+ Enter Custom Operator</option>
+                  </select>
+                  {(!operatorName || !roster.some((op) => op.name === operatorName)) && (
+                    <input
+                      type="text"
+                      className="field-input"
+                      aria-label="Tandem Operator manual entry"
+                      value={operatorName}
+                      onChange={(e) => setOperatorName(e.target.value)}
+                      placeholder="Type operator name"
+                      style={{ marginTop: 4 }}
+                    />
+                  )}
+                </div>
 
-            <div className="field-group">
-              <label className="field-label" htmlFor="tan-operator">Operator *</label>
-              <select
-                id="tan-operator"
-                className="field-select"
-                value={roster.some((op) => op.name === operatorName) ? operatorName : operatorName ? '__CUSTOM__' : ''}
-                onChange={(e) => {
-                  if (e.target.value === '__CUSTOM__') setOperatorName('');
-                  else setOperatorName(e.target.value);
-                }}
-              >
-                <option value="">-- Select Operator --</option>
-                {roster.map((op) => (
-                  <option key={op.emp_id} value={op.name}>{op.name} ({op.emp_id})</option>
-                ))}
-                <option value="__CUSTOM__">+ Enter Custom Operator</option>
-              </select>
-              {(!operatorName || !roster.some((op) => op.name === operatorName)) && (
-                <input
-                  type="text"
-                  className="field-input"
-                  aria-label="Tandem Operator manual entry"
-                  value={operatorName}
-                  onChange={(e) => setOperatorName(e.target.value)}
-                  placeholder="Type operator name"
-                  style={{ marginTop: 4 }}
-                />
-              )}
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="tan-line">Tandem Line *</label>
-              <select
-                id="tan-line"
-                className="field-select mono"
-                value={selectedLine}
-                onChange={(e) => setSelectedLine(e.target.value)}
-              >
-                {tandemLines.map((l) => (
-                  <option key={l.machine_number} value={l.machine_number}>
-                    {l.machine_number} ({l.tonnage}T)
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="tan-hour">Hour *</label>
-              <select
-                id="tan-hour"
-                className="field-select"
-                value={selectedHour}
-                onChange={(e) => setSelectedHour(e.target.value)}
-              >
-                {HOUR_SLOTS.map((h) => (
-                  <option key={h.key} value={h.label}>{h.label}</option>
-                ))}
-              </select>
+                <div className="field-group">
+                  <label className="field-label" htmlFor="tan-line">Tandem Line *</label>
+                  <select
+                    id="tan-line"
+                    className="field-select mono"
+                    value={selectedLine}
+                    onChange={(e) => setSelectedLine(e.target.value)}
+                  >
+                    {tandemLines.map((l) => (
+                      <option key={l.machine_number} value={l.machine_number}>
+                        {l.machine_number} ({l.tonnage}T)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
           </div>
+
+          {isSequentialMode && timePool.isExceeded && (
+            <div className="banner is-err" role="alert">
+              <span>Sequential changeover mode active: combined minutes ({timePool.totalAllocated} min) cannot exceed 60 min in {selectedHour}.</span>
+            </div>
+          )}
 
           {/* Parts 1..4 */}
           {parts.map((part, idx) => {
             const pm = summary.partMetrics[idx];
             return (
-              <div key={idx} className="part-entry-card" style={{ marginBottom: 14 }}>
+              <div key={idx} className="part-entry-card">
                 <div className="part-entry-head">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span className={`status-pill ${idx === 0 ? 'is-orange' : 'is-ok'}`}>
                       Part {idx + 1}
                     </span>
-                    <strong>Simultaneous Tool Run #{idx + 1} on {selectedLine}</strong>
+                    <strong>
+                      {isSequentialMode ? 'Sequential Tool Run' : 'Simultaneous Tool Run'} #{idx + 1} on {selectedLine}
+                    </strong>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="status-pill tabular">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span className="status-pill is-orange tabular">
+                      Hourly Target (×60): {pm.fullHourTarget.toLocaleString()}
+                    </span>
+                    <span className="status-pill is-ok tabular">
                       Output: {pm.actual.toLocaleString()} / {pm.target.toLocaleString()} pcs ({pm.pct}%)
                     </span>
                     {parts.length > 1 && (
@@ -559,68 +662,78 @@ export default function TandemProductionView({
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 12, marginBottom: 12 }}>
-                  <ToolSelectorField
-                    id={`tan-p${idx + 1}-tool`}
-                    label={`Part ${idx + 1} Tool Number *`}
-                    value={part.tool_number}
-                    tools={tools}
-                    machineType="Tandem"
-                    onChange={(val, matched) => {
-                      const patch = { tool_number: val };
-                      if (matched) {
-                        if (matched.part_name) patch.part_name = matched.part_name;
-                        if (matched.standard_uph > 0 && !part.uph) patch.uph = String(matched.standard_uph);
-                      }
-                      updatePart(idx, patch);
-                    }}
-                  />
-
-                  <div className="field-group">
-                    <label className="field-label" htmlFor={`tan-p${idx + 1}-uph`}>UPH (Units/Hr) *</label>
-                    <input
-                      id={`tan-p${idx + 1}-uph`}
-                      type="text"
-                      inputMode="decimal"
-                      className="field-input tabular"
-                      value={part.uph}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || /^\d*\.?\d*$/.test(v)) updatePart(idx, { uph: v });
+                  <div className="zone-panel zone-yellow" style={{ padding: 10 }}>
+                    <ToolSelectorField
+                      id={`tan-p${idx + 1}-tool`}
+                      label={`Part ${idx + 1} Tool Number *`}
+                      value={part.tool_number}
+                      tools={tools}
+                      machineType="Tandem"
+                      onChange={(val, matched) => {
+                        const patch = { tool_number: val };
+                        if (matched) {
+                          if (matched.part_name) patch.part_name = matched.part_name;
+                          if (matched.standard_uph > 0 && !part.uph) patch.uph = String(matched.standard_uph);
+                        }
+                        updatePart(idx, patch);
                       }}
-                      placeholder="e.g. 500"
                     />
                   </div>
 
-                  <div className="field-group">
-                    <label className="field-label" htmlFor={`tan-p${idx + 1}-run`}>Running Duration (min)</label>
-                    <input
-                      id={`tan-p${idx + 1}-run`}
-                      type="text"
-                      inputMode="numeric"
-                      className="field-input tabular"
-                      value={part.running_minutes}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || /^\d+$/.test(v)) updatePart(idx, { running_minutes: v });
-                      }}
-                      placeholder="60"
-                    />
+                  <div className="zone-panel zone-blue" style={{ padding: 10 }}>
+                    <div className="field-group">
+                      <label className="field-label" htmlFor={`tan-p${idx + 1}-uph`}>Machine Speed (UPH) *</label>
+                      <input
+                        id={`tan-p${idx + 1}-uph`}
+                        type="text"
+                        inputMode="decimal"
+                        className="field-input tabular"
+                        value={part.uph}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === '' || /^\d*\.?\d*$/.test(v)) updatePart(idx, { uph: v });
+                        }}
+                        placeholder="e.g. 500"
+                      />
+                    </div>
                   </div>
 
-                  <div className="field-group">
-                    <label className="field-label" htmlFor={`tan-p${idx + 1}-actual`}>Actual Production *</label>
-                    <input
-                      id={`tan-p${idx + 1}-actual`}
-                      type="text"
-                      inputMode="numeric"
-                      className="field-input tabular"
-                      value={part.actual_qty}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || /^\d+$/.test(v)) updatePart(idx, { actual_qty: v });
-                      }}
-                      placeholder="Enter produced pcs"
-                    />
+                  <div className="zone-panel zone-yellow" style={{ padding: 10 }}>
+                    <div className="field-group">
+                      <label className="field-label" htmlFor={`tan-p${idx + 1}-run`}>Allocated Time (min)</label>
+                      <input
+                        id={`tan-p${idx + 1}-run`}
+                        type="text"
+                        inputMode="numeric"
+                        className="field-input tabular"
+                        value={part.running_minutes}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === '' || /^\d+$/.test(v)) updatePart(idx, { running_minutes: v });
+                        }}
+                        placeholder="60"
+                      />
+                      <span className="field-help tabular">Applicable Target: {pm.target.toLocaleString()} pcs</span>
+                    </div>
+                  </div>
+
+                  <div className="zone-panel zone-green" style={{ padding: 10 }}>
+                    <div className="field-group">
+                      <label className="field-label" htmlFor={`tan-p${idx + 1}-actual`}>Actual Production *</label>
+                      <input
+                        id={`tan-p${idx + 1}-actual`}
+                        type="text"
+                        inputMode="numeric"
+                        className="field-input tabular"
+                        value={part.actual_qty}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === '' || /^\d+$/.test(v)) updatePart(idx, { actual_qty: v });
+                        }}
+                        placeholder="Enter produced pcs"
+                      />
+                      <span className="field-help tabular">Good: {pm.good.toLocaleString()} pcs</span>
+                    </div>
                   </div>
                 </div>
 
@@ -637,23 +750,34 @@ export default function TandemProductionView({
             );
           })}
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
-            <button
-              type="button"
-              className="btn btn-green btn-sm"
-              onClick={handleAddPart}
-              disabled={parts.length >= 4}
-            >
-              <Plus size={14} />
-              <span>Add Simultaneous Part ({parts.length}/4 Max)</span>
-            </button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn btn-green btn-sm"
+                onClick={handleAddPart}
+                disabled={parts.length >= 4 || (isSequentialMode && timePool.remainingMinutes <= 0)}
+              >
+                <Plus size={14} />
+                <span>
+                  {isSequentialMode
+                    ? `Add Tool (${parts.length}/4 • ${timePool.remainingMinutes} min free)`
+                    : `Add Simultaneous Part (${parts.length}/4 Max)`}
+                </span>
+              </button>
+              {isSequentialMode && (
+                <span className="status-pill is-yellow tabular">
+                  <Clock size={12} /> Pool: {timePool.totalAllocated}m used / {timePool.remainingMinutes}m left
+                </span>
+              )}
+            </div>
 
             <div className="hourly-calc-strip">
-              <span><strong>Line Hourly Output:</strong> <span className="tabular">{summary.totalActual.toLocaleString()} pcs</span></span>
+              <span><strong>Line Output:</strong> <span className="tabular">{summary.totalActual.toLocaleString()} pcs</span></span>
               <span><strong>Line Target:</strong> <span className="tabular">{summary.totalTarget.toLocaleString()} pcs</span></span>
               <span>
                 <strong>Line Achievement:</strong>{' '}
-                <span className={`status-pill tabular ${tone === 'green' ? 'is-ok' : tone === 'orange' ? 'is-warn' : tone === 'red' ? 'is-err' : ''}`}>
+                <span className={`status-pill tabular ${tone === 'green' ? 'is-ok' : tone === 'orange' ? 'is-orange' : tone === 'red' ? 'is-err' : ''}`}>
                   {summary.totalTarget > 0 ? `${summary.combinedPct}%` : '—'}
                 </span>
               </span>
@@ -672,7 +796,7 @@ export default function TandemProductionView({
             hour={selectedHour}
           />
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'end', marginTop: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'end' }}>
             <div className="field-group">
               <label className="field-label" htmlFor="tan-remarks">Line / Hour Remarks</label>
               <input
@@ -685,7 +809,11 @@ export default function TandemProductionView({
               />
             </div>
 
-            <button type="submit" className="btn btn-primary" disabled={syncStatus.state === 'saving'}>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={syncStatus.state === 'saving' || (isSequentialMode && timePool.isExceeded)}
+            >
               <Save size={16} />
               <span>{syncStatus.state === 'saving' ? 'Saving...' : `Save ${selectedLine} Entry`}</span>
             </button>
@@ -698,7 +826,7 @@ export default function TandemProductionView({
         <div className="section-header">
           <div>
             <h2 className="section-title">{selectedLine} — {selectedShift} Hourly Multi-Part Log ({selectedDate})</h2>
-            <p className="section-subtitle">Click an hour row to load or edit simultaneous parts.</p>
+            <p className="section-subtitle">Click an hour row to load or edit parts.</p>
           </div>
         </div>
 
@@ -707,13 +835,14 @@ export default function TandemProductionView({
             <thead>
               <tr>
                 <th>Hour</th>
-                <th>Simultaneous Parts &amp; Tools</th>
+                <th>Parts &amp; Tools</th>
                 <th>Operator</th>
                 <th>Line Target</th>
                 <th>Line Output</th>
                 <th>Ach %</th>
                 <th>Scrap</th>
                 <th>Downtime</th>
+                {caps.canDeleteProduction && <th>Action</th>}
               </tr>
             </thead>
             <tbody>
@@ -725,7 +854,7 @@ export default function TandemProductionView({
                   <tr
                     key={slot.key}
                     onClick={() => setSelectedHour(slot.label)}
-                    style={{ cursor: 'pointer', background: selectedHour === slot.label ? 'var(--accent-tint)' : undefined }}
+                    style={{ cursor: 'pointer', background: selectedHour === slot.label ? 'var(--blue-soft)' : undefined }}
                   >
                     <td><strong>{slot.label}</strong></td>
                     <td>
@@ -736,7 +865,7 @@ export default function TandemProductionView({
                           {grp.parts.map((pt, i) => (
                             <div key={pt.id || i} style={{ fontSize: '0.78rem' }}>
                               <span className="mono" style={{ fontWeight: 700 }}>P{pt.part_index}: {pt.tool_number}</span>{' '}
-                              <span className="tabular">({pt.actual_qty}/{pt.target_qty} pcs)</span>
+                              <span className="tabular">({pt.running_minutes}m • {pt.actual_qty}/{pt.target_qty} pcs)</span>
                             </div>
                           ))}
                         </div>
@@ -748,6 +877,21 @@ export default function TandemProductionView({
                     <td className="tabular">{grp && grp.totalTarget > 0 ? `${grp.achievementPct}%` : '—'}</td>
                     <td className="tabular">{grp ? grp.totalScrap : '—'}</td>
                     <td className="tabular">{grp ? `${grp.downtimeMinutes}m` : '—'}</td>
+                    {caps.canDeleteProduction && (
+                      <td onClick={(e) => e.stopPropagation()}>
+                        {grp ? (
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => setDeleteSlotTarget(grp)}
+                          >
+                            <Trash2 size={13} /> Delete
+                          </button>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -755,6 +899,36 @@ export default function TandemProductionView({
           </table>
         </div>
       </section>
+
+      {deleteSlotTarget && caps.canDeleteProduction && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tan-del-slot-title">
+          <div className="modal-dialog" style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3 id="tan-del-slot-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Delete Tandem Hourly Entry?
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteSlotTarget(null)} disabled={deletingSlot}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p>
+                Delete all {deleteSlotTarget.parts.length} part record(s) for <strong className="mono">{selectedLine}</strong> on{' '}
+                <strong className="tabular">{selectedDate}</strong> ({selectedShift}, <strong>{deleteSlotTarget.hour_interval}</strong>)?
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteSlotTarget(null)} disabled={deletingSlot}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" onClick={handleConfirmDeleteSlot} disabled={deletingSlot}>
+                {deletingSlot ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

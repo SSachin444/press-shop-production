@@ -1,6 +1,6 @@
 {
-  "short_name": "PHA India",
-  "name": "PHA INDIA Industrial Management",
+  "short_name": "PHA INDIA",
+  "name": "PHA INDIA — Press Shop MFG-2 MES",
   "icons": [
     {
       "src": "favicon.svg",
@@ -9,8 +9,8 @@
     }
   ],
   "start_url": "/",
-  "background_color": "#0b1329",
-  "theme_color": "#1e40af",
+  "background_color": "#F4F7FB",
+  "theme_color": "#14243A",
   "display": "standalone",
   "orientation": "portrait"
 }

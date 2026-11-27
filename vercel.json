@@ -5,7 +5,7 @@
       "destination": "/PRESS_SHOP_MFG-2.apk"
     },
     {
-      "source": "/((?!assets/|PRESS_SHOP_MFG-2\\.apk|favicon\\.svg|manifest\\.json|.*\\.[a-zA-Z0-9]+$).*)",
+      "source": "/((?!api/|assets/|PRESS_SHOP_MFG-2\\.apk|favicon\\.svg|manifest\\.json|.*\\.[a-zA-Z0-9]+$).*)",
       "destination": "/index.html"
     }
   ],

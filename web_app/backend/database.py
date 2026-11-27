@@ -387,6 +387,56 @@ def init_db():
             (code, name, desc, order_num),
         )
 
+    # 14. Tool Directory
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tools (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool_number TEXT UNIQUE NOT NULL,
+        part_name TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        customer TEXT DEFAULT '',
+        compatible_type TEXT NOT NULL DEFAULT 'Both',
+        compatible_machines TEXT DEFAULT '',
+        standard_uph REAL NOT NULL DEFAULT 0,
+        tonnage_required REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Active',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # 15. WhatsApp Recipients & Report Dispatch History
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS whatsapp_recipients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        phone_number TEXT UNIQUE NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS whatsapp_reports_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_send_id TEXT UNIQUE,
+        report_type TEXT NOT NULL,
+        report_title TEXT DEFAULT '',
+        filters_json TEXT NOT NULL DEFAULT '{}',
+        message_preview TEXT NOT NULL DEFAULT '',
+        recipients_json TEXT NOT NULL DEFAULT '[]',
+        delivery_mode TEXT NOT NULL DEFAULT 'cloud-api',
+        overall_status TEXT NOT NULL DEFAULT 'pending',
+        sent_by TEXT DEFAULT '',
+        sent_by_role TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
 
     # Seed Default Machines if none exist (16 NC Machines + 6 Tandem Lines)

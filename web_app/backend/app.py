@@ -308,6 +308,51 @@ def change_password():
     return jsonify({"success": True, "message": "Password updated successfully."})
 
 
+@app.route("/api/auth/change-username", methods=["POST"])
+@_auth("Admin", "Supervisor")
+def change_username():
+    data = request.get_json(silent=True) or {}
+    current_pw = str(data.get("current_password", ""))
+    new_username = str(data.get("new_username", "")).strip().lower()
+
+    if not re.match(r"^[a-z0-9][a-z0-9._-]{2,31}$", new_username):
+        return jsonify({"error": "User ID must be 3-32 characters (letters, numbers, ., _, -)."}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id = ?", (g.current_user["uid"],))
+    user = cur.fetchone()
+    if not user or not verify_password(current_pw, user["password_hash"]):
+        conn.close()
+        return jsonify({"error": "Current password is incorrect."}), 400
+
+    if new_username == user["username"].lower():
+        conn.close()
+        return jsonify({"error": "New User ID must differ from your current User ID."}), 400
+
+    cur.execute("SELECT id FROM users WHERE LOWER(username) = ? AND id != ?", (new_username, user["id"]))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"error": f'User ID "{new_username}" is already in use.'}), 409
+
+    cur.execute("UPDATE users SET username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (new_username, user["id"]))
+    cur.execute(
+        "INSERT INTO recovery_audit_logs (target_role, event_type, success, detail, ip_address) VALUES (?, 'USERNAME_CHANGED', 1, ?, ?)",
+        (user["role"], f"{user['username']} -> {new_username}", request.remote_addr or ""),
+    )
+    _log_audit(conn, new_username, user["role"], "UPDATE", "Account", str(user["id"]), f"Changed User ID from {user['username']} to {new_username}")
+    conn.commit()
+    conn.close()
+
+    token = sign_session_token({
+        "uid": user["id"],
+        "username": new_username,
+        "full_name": user["full_name"],
+        "role": user["role"],
+    })
+    return jsonify({"success": True, "username": new_username, "token": token})
+
+
 @app.route("/api/auth/recovery-email", methods=["POST"])
 @_auth("Admin")
 def set_recovery_email():
@@ -524,7 +569,7 @@ def manage_users():
         username = str(data.get("username", "")).strip().lower()
         full_name = str(data.get("full_name", "")).strip()
         role = "Admin" if data.get("role") == "Admin" else "Supervisor"
-        temp_pw = str(data.get("temp_password", ""))
+        temp_pw = str(data.get("temp_password") or data.get("password") or "")
         dept = str(data.get("department", "Press Shop MFG-2")).strip()
 
         if not username or not full_name or len(temp_pw) < 6:
@@ -574,18 +619,25 @@ def update_user_account(user_id):
     if "role" in data and data["role"] in ("Admin", "Supervisor"):
         next_role = data["role"]
     next_name = str(data.get("full_name", existing["full_name"])).strip() or existing["full_name"]
+    next_username = str(data.get("username", existing["username"])).strip().lower() or existing["username"]
+    if next_username != existing["username"]:
+        cur.execute("SELECT id FROM users WHERE LOWER(username) = ? AND id != ?", (next_username, user_id))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"error": f'Username "{next_username}" is already in use.'}), 409
 
     cur.execute(
-        "UPDATE users SET is_active = ?, role = ?, full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (next_active, next_role, next_name, user_id),
+        "UPDATE users SET username = ?, is_active = ?, role = ?, full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (next_username, next_active, next_role, next_name, user_id),
     )
-    if data.get("temp_password"):
+    pw_val = data.get("temp_password") or data.get("new_password")
+    if pw_val:
         cur.execute(
             "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
-            (hash_password(str(data["temp_password"])), user_id),
+            (hash_password(str(pw_val)), user_id),
         )
 
-    _log_audit(conn, g.current_user["username"], "Admin", "UPDATE", "User", existing["username"], f"Updated role={next_role}, active={bool(next_active)}")
+    _log_audit(conn, g.current_user["username"], "Admin", "UPDATE", "User", next_username, f"Updated role={next_role}, active={bool(next_active)}")
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -901,7 +953,10 @@ def hourly_production_api():
                 rejected_qty = int(item.get("rejected_qty", 0) or 0)
                 downtime_min = int(item.get("downtime_minutes", 0) or 0)
                 uph_val = float(item.get("uph", 0) or 0)
-                target_qty = int(round(uph_val * 60)) if uph_val > 0 else int(item.get("target_qty", 0) or 0)
+                running_min = float(item.get("running_minutes", 60) or 60)
+                if running_min <= 0 or running_min > 60:
+                    running_min = 60.0
+                target_qty = int(round(uph_val * running_min)) if uph_val > 0 else int(item.get("target_qty", 0) or 0)
             except (KeyError, ValueError, TypeError):
                 conn.close()
                 return jsonify({"error": "Numeric fields must be valid integers/numbers."}), 400
@@ -1001,12 +1056,108 @@ def post_production_records():
     return hourly_production_api()
 
 
+@app.route("/api/production/hourly-batch", methods=["POST", "OPTIONS"])
+def hourly_batch_production_api():
+    if request.method == "OPTIONS":
+        return "", 200
+    @_auth("Admin", "Supervisor", "Operator")
+    def _post_batch():
+        data = request.get_json(silent=True) or {}
+        parts = data.get("parts") or []
+        if not parts:
+            return jsonify({"error": "At least one tool/part entry is required."}), 400
+        p_type = str(data.get("production_type", "NC")).strip()
+        tandem_mode = str(data.get("tandem_mode", "simultaneous")).strip().lower()
+        enforce_pool = p_type != "Tandem" or tandem_mode == "sequential"
+        total_mins = sum(float(p.get("running_minutes", 60) or 60) for p in parts)
+        if enforce_pool and total_mins > 60:
+            return jsonify({"error": f"Total allocated time ({int(round(total_mins))} min) exceeds 60 minutes in this hour."}), 400
+        conn = get_db()
+        cur = conn.cursor()
+        saved = []
+        base_hour = str(data.get("hour_interval", "")).strip()
+        m_num = str(data.get("machine_or_line", "")).strip().upper()
+        p_date = str(data.get("date", "")).strip()
+        p_shift = str(data.get("shift", "")).strip()
+        op_name = str(data.get("operator_name", "")).strip()
+        if not m_num or not p_date or not p_shift or not base_hour or not op_name:
+            conn.close()
+            return jsonify({"error": "Date, shift, operator, machine/line, and hour are required."}), 400
+        cur.execute(
+            "DELETE FROM production_records WHERE machine_or_line = ? AND date = ? AND shift = ? AND (hour_interval = ? OR hour_interval LIKE ?)",
+            (m_num, p_date, p_shift, base_hour, f"{base_hour} [P%"),
+        )
+        for idx, p in enumerate(parts, start=1):
+            uph_val = float(p.get("uph") or 0)
+            mins = float(p.get("running_minutes", 60) or 60)
+            actual_qty = int(p.get("actual_qty") or 0)
+            rejected_qty = int(p.get("rejected_qty") or 0)
+            good_qty = max(0, actual_qty - rejected_qty)
+            target_qty = int(round(uph_val * mins)) if uph_val > 0 else int(p.get("target_qty") or 0)
+            pct = round((actual_qty / target_qty) * 100, 1) if target_qty > 0 else 0.0
+            slot_dt = int(p.get("downtime_minutes") or 0) if idx == 1 else 0
+            slot_key = base_hour if idx == 1 else f"{base_hour} [P{idx}]"
+            cur.execute(
+                """
+                INSERT INTO production_records (
+                    plant_id, production_type, machine_or_line, date, shift, hour_interval,
+                    operator_name, tool_number, uph, target_qty, actual_qty, good_qty, rejected_qty,
+                    downtime_minutes, downtime_code, downtime_reason, remarks,
+                    production_pct, hourly_output_pct, entry_time, submitted_by_role, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(data.get("plant_id", "Plant 1")), p_type, m_num, p_date, p_shift, slot_key,
+                    op_name, str(p.get("tool_number", "")).strip().upper(), uph_val, target_qty,
+                    actual_qty, good_qty, rejected_qty, slot_dt,
+                    str(p.get("downtime_code", "D01")), str(p.get("downtime_reason", "")),
+                    str(p.get("remarks", data.get("remarks", ""))), pct, pct,
+                    datetime.now().strftime("%H:%M:%S"), g.current_user["role"],
+                ),
+            )
+            cur.execute("SELECT * FROM production_records WHERE id = ?", (cur.lastrowid,))
+            saved.append(dict(cur.fetchone()))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "records": saved})
+    return _post_batch()
+
+
+@app.route("/api/production/delete-slot", methods=["POST"])
+@_auth("Admin")
+def delete_production_slot():
+    data = request.get_json(silent=True) or {}
+    m_num = str(data.get("machine_or_line", "")).strip().upper()
+    p_date = str(data.get("date", "")).strip()
+    p_shift = str(data.get("shift", "")).strip()
+    base_hour = str(data.get("hour_interval", "")).strip()
+    if not m_num or not p_date or not p_shift or not base_hour:
+        return jsonify({"error": "Machine, date, shift, and hour are required."}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM production_records WHERE machine_or_line = ? AND date = ? AND shift = ? AND (hour_interval = ? OR hour_interval LIKE ?)",
+        (m_num, p_date, p_shift, base_hour, f"{base_hour} [P%"),
+    )
+    deleted = cur.rowcount
+    if deleted == 0:
+        conn.close()
+        return jsonify({"error": "No matching hourly records found to delete."}), 404
+    _log_audit(conn, g.current_user["username"], "Admin", "DELETE", "Production Slot", f"{m_num} {p_date} {p_shift} {base_hour}", f"Deleted {deleted} hourly production row(s)")
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "deleted": deleted})
+
+
 @app.route("/api/production/records/<int:record_id>", methods=["DELETE"])
 @_auth("Admin")
 def delete_production_record(record_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM production_records WHERE id = ?", (record_id,))
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"error": f"Production record #{record_id} not found."}), 404
     _log_audit(conn, g.current_user["username"], "Admin", "DELETE", "Production Record", str(record_id), f"Deleted production record #{record_id}")
     conn.commit()
     conn.close()
@@ -1115,8 +1266,23 @@ def single_employee_api(emp_id):
     conn = get_db()
     cur = conn.cursor()
     if request.method == "DELETE":
-        cur.execute("DELETE FROM attendance WHERE emp_id = ?", (emp_id,))
-        cur.execute("DELETE FROM overtime WHERE emp_id = ?", (emp_id,))
+        cur.execute("SELECT * FROM employees WHERE emp_id = ?", (emp_id,))
+        emp = cur.fetchone()
+        if not emp:
+            conn.close()
+            return jsonify({"error": f"Employee {emp_id} not found."}), 404
+        cur.execute("SELECT COUNT(*) FROM attendance WHERE emp_id = ?", (emp_id,))
+        att_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM overtime WHERE emp_id = ?", (emp_id,))
+        ot_cnt = cur.fetchone()[0]
+        if att_cnt > 0 or ot_cnt > 0:
+            # Preserve historical attendance & overtime records instead of cascading deletes
+            cur.execute("UPDATE employees SET status = 'Inactive', assigned_machine = '', updated_at = CURRENT_TIMESTAMP WHERE emp_id = ?", (emp_id,))
+            _log_audit(conn, g.current_user["username"], "Admin", "ARCHIVE", "Employee", emp_id, f"Archived employee {emp_id} to preserve {att_cnt} attendance and {ot_cnt} overtime record(s)")
+            conn.commit()
+            conn.close()
+            return jsonify({"success": True, "archived": True, "message": f"Employee {emp_id} marked Inactive to preserve historical attendance/overtime records."})
+        cur.execute("UPDATE machines SET assigned_operator = '' WHERE assigned_operator = ?", (emp["name"],))
         cur.execute("DELETE FROM employees WHERE emp_id = ?", (emp_id,))
         _log_audit(conn, g.current_user["username"], "Admin", "DELETE", "Employee", emp_id, f"Deleted employee {emp_id}")
         conn.commit()
@@ -1232,12 +1398,25 @@ def handovers_api():
     return jsonify({"handovers": rows})
 
 
-@app.route("/api/handovers/<int:hid>", methods=["PUT"])
+@app.route("/api/handovers/<int:hid>", methods=["PUT", "DELETE"])
 @_auth("Admin", "Supervisor")
 def update_handover(hid):
-    data = request.get_json(silent=True) or {}
     conn = get_db()
     cur = conn.cursor()
+    if request.method == "DELETE":
+        if g.current_user["role"] != "Admin":
+            conn.close()
+            return jsonify({"error": "Only Admin can delete shift handovers."}), 403
+        cur.execute("DELETE FROM shift_handovers WHERE id = ?", (hid,))
+        if cur.rowcount == 0:
+            conn.close()
+            return jsonify({"error": f"Shift handover #{hid} not found."}), 404
+        _log_audit(conn, g.current_user["username"], "Admin", "DELETE", "Handover", str(hid), f"Deleted shift handover #{hid}")
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+
+    data = request.get_json(silent=True) or {}
     cur.execute(
         "UPDATE shift_handovers SET completion_status = COALESCE(?, completion_status), follow_up_actions = COALESCE(?, follow_up_actions) WHERE id = ?",
         (data.get("completion_status"), data.get("follow_up_actions"), hid),
@@ -1538,6 +1717,230 @@ def get_live_notifications():
 @_auth("Admin")
 def handle_state_readonly():
     return jsonify(get_full_state())
+
+
+@app.route("/api/machine-downtime/<int:dt_id>", methods=["DELETE"])
+@_auth("Admin")
+def delete_machine_downtime(dt_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM machine_downtime WHERE id = ?", (dt_id,))
+    deleted = cur.rowcount
+    if deleted == 0:
+        conn.close()
+        return jsonify({"error": "Downtime record not found."}), 404
+    _log_audit(conn, g.current_user["username"], "Admin", "DELETE", "Downtime", str(dt_id), f"Deleted downtime record #{dt_id}")
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+
+@app.route("/api/whatsapp/status", methods=["GET"])
+@_auth("Admin", "Supervisor")
+def whatsapp_status_api():
+    token = os.environ.get("WHATSAPP_ACCESS_TOKEN", "").strip()
+    phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip()
+    version = os.environ.get("WHATSAPP_API_VERSION", "v21.0").strip()
+    tmpl = os.environ.get("WHATSAPP_TEMPLATE_NAME", "").strip()
+    missing = [k for k, v in [("WHATSAPP_ACCESS_TOKEN", token), ("WHATSAPP_PHONE_NUMBER_ID", phone_id)] if not v]
+    return jsonify({
+        "configured": bool(token and phone_id),
+        "provider": "Meta WhatsApp Business Platform Cloud API",
+        "apiVersion": version,
+        "hasTemplateConfigured": bool(tmpl),
+        "missingEnvVars": missing,
+    })
+
+
+@app.route("/api/whatsapp/recipients", methods=["GET", "POST"])
+@_auth("Admin", "Supervisor")
+def whatsapp_recipients_api():
+    conn = get_db()
+    cur = conn.cursor()
+    if request.method == "GET":
+        cur.execute("SELECT * FROM whatsapp_recipients ORDER BY id ASC")
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"recipients": rows})
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    phone = re.sub(r"[\s\-()]", "", str(data.get("phone_number", "")).strip())
+    if not name or not re.match(r"^\+[1-9]\d{6,14}$", phone):
+        conn.close()
+        return jsonify({"error": "Valid recipient name and international E.164 phone number (e.g. +919876543210) are required."}), 400
+    cur.execute("SELECT COUNT(*) FROM whatsapp_recipients")
+    if cur.fetchone()[0] >= 5:
+        conn.close()
+        return jsonify({"error": "Maximum 5 WhatsApp recipients allowed."}), 400
+    cur.execute("SELECT id FROM whatsapp_recipients WHERE phone_number = ?", (phone,))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"error": f"Phone number {phone} is already saved."}), 409
+    cur.execute(
+        "INSERT INTO whatsapp_recipients (name, phone_number, created_by) VALUES (?, ?, ?)",
+        (name, phone, g.current_user["username"]),
+    )
+    rid = cur.lastrowid
+    conn.commit()
+    cur.execute("SELECT * FROM whatsapp_recipients WHERE id = ?", (rid,))
+    row = dict(cur.fetchone())
+    conn.close()
+    return jsonify({"recipient": row}), 201
+
+
+@app.route("/api/whatsapp/recipients/<int:rid>", methods=["PUT", "DELETE"])
+@_auth("Admin", "Supervisor")
+def whatsapp_single_recipient_api(rid):
+    conn = get_db()
+    cur = conn.cursor()
+    if request.method == "DELETE":
+        cur.execute("DELETE FROM whatsapp_recipients WHERE id = ?", (rid,))
+        if cur.rowcount == 0:
+            conn.close()
+            return jsonify({"error": "Recipient not found."}), 404
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    phone = re.sub(r"[\s\-()]", "", str(data.get("phone_number", "")).strip())
+    if not name or not re.match(r"^\+[1-9]\d{6,14}$", phone):
+        conn.close()
+        return jsonify({"error": "Valid recipient name and E.164 phone number required."}), 400
+    cur.execute("SELECT id FROM whatsapp_recipients WHERE phone_number = ? AND id != ?", (phone, rid))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"error": f"Phone number {phone} already exists."}), 409
+    cur.execute(
+        "UPDATE whatsapp_recipients SET name = ?, phone_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (name, phone, rid),
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM whatsapp_recipients WHERE id = ?", (rid,))
+    row = cur.fetchone()
+    conn.close()
+    return jsonify({"recipient": dict(row) if row else None})
+
+
+@app.route("/api/whatsapp/history", methods=["GET"])
+@_auth("Admin", "Supervisor")
+def whatsapp_history_api():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM whatsapp_reports_log ORDER BY id DESC LIMIT 50")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify({"history": rows})
+
+
+@app.route("/api/whatsapp/send", methods=["POST"])
+@_auth("Admin", "Supervisor")
+def whatsapp_send_api():
+    import urllib.request
+    import urllib.error
+    data = request.get_json(silent=True) or {}
+    recipients = (data.get("recipients") or [])[:5]
+    message_text = str(data.get("message", "")).strip()
+    if not recipients or not message_text:
+        return jsonify({"error": "Recipients and report message are required."}), 400
+
+    token = os.environ.get("WHATSAPP_ACCESS_TOKEN", "").strip()
+    phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip()
+    version = os.environ.get("WHATSAPP_API_VERSION", "v21.0").strip()
+    tmpl = os.environ.get("WHATSAPP_TEMPLATE_NAME", "").strip()
+    tmpl_lang = os.environ.get("WHATSAPP_TEMPLATE_LANG", "en").strip()
+
+    if not token or not phone_id:
+        missing = [k for k, v in [("WHATSAPP_ACCESS_TOKEN", token), ("WHATSAPP_PHONE_NUMBER_ID", phone_id)] if not v]
+        return jsonify({
+            "configured": False,
+            "error": f"WhatsApp Business Cloud API is not configured on the server. Missing: {', '.join(missing)}.",
+            "missingEnvVars": missing,
+            "results": [{"name": r.get("name", ""), "phone_number": r.get("phone_number", ""), "status": "failed", "error": f"Missing {', '.join(missing)}"} for r in recipients],
+        }), 503
+
+    results = []
+    for r in recipients:
+        phone = re.sub(r"[\s\-()]", "", str(r.get("phone_number", "")).strip())
+        if not re.match(r"^\+[1-9]\d{6,14}$", phone):
+            results.append({"name": r.get("name", ""), "phone_number": phone, "status": "failed", "error": "Invalid E.164 phone number."})
+            continue
+        wa_to = phone.lstrip("+")
+        payload = (
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": wa_to,
+                "type": "template",
+                "template": {"name": tmpl, "language": {"code": tmpl_lang}, "components": [{"type": "body", "parameters": [{"type": "text", "text": message_text[:1024]}]}]},
+            }
+            if tmpl
+            else {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": wa_to,
+                "type": "text",
+                "text": {"preview_url": False, "body": message_text[:4096]},
+            }
+        )
+        req = urllib.request.Request(
+            f"https://graph.facebook.com/{version}/{phone_id}/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                results.append({"name": r.get("name", ""), "phone_number": phone, "status": "sent", "message_id": (resp_json.get("messages") or [{}])[0].get("id", "")})
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            try:
+                err_msg = json.loads(err_body).get("error", {}).get("message", err_body)
+            except Exception:
+                err_msg = err_body or str(e)
+            results.append({"name": r.get("name", ""), "phone_number": phone, "status": "failed", "error": err_msg})
+        except Exception as e:
+            results.append({"name": r.get("name", ""), "phone_number": phone, "status": "failed", "error": str(e)})
+
+    sent_cnt = sum(1 for x in results if x["status"] == "sent")
+    overall = "sent" if sent_cnt == len(results) else ("partial" if sent_cnt > 0 else "failed")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO whatsapp_reports_log (
+                report_type, report_label, recipients_json, recipient_count, sent_count, failed_count,
+                overall_status, message_preview, filters_json, sent_by, delivery_mode, client_send_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cloud_api', ?)
+            """,
+            (
+                str(data.get("report_type", "combined")),
+                str(data.get("report_label", "Report")),
+                json.dumps(results),
+                len(results),
+                sent_cnt,
+                len(results) - sent_cnt,
+                overall,
+                message_text[:300],
+                json.dumps(data.get("filters") or {}),
+                g.current_user["username"],
+                str(data.get("client_send_id", "")).strip() or None,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return jsonify({
+        "configured": True,
+        "success": sent_cnt > 0,
+        "overall_status": overall,
+        "sent_count": sent_cnt,
+        "failed_count": len(results) - sent_cnt,
+        "results": results,
+    }), (200 if sent_cnt > 0 else 502)
 
 
 if __name__ == "__main__":

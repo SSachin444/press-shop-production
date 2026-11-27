@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import { Plus, CheckCircle2, AlertCircle, RefreshCw, Trash2, ShieldAlert, X } from 'lucide-react';
 import { getCapabilities } from '../config/roles';
 import { cloudApi } from '../services/cloudClient';
 import { SHIFTS } from '../services/metrics';
@@ -10,6 +10,8 @@ export default function HandoversView({ selectedDate, selectedShift, currentUser
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [form, setForm] = useState({
     date: selectedDate,
@@ -92,6 +94,22 @@ export default function HandoversView({ selectedDate, selectedShift, currentUser
       await loadHandovers();
     } catch (err) {
       setNotice({ type: 'err', text: err?.message || 'Unable to update handover.' });
+    }
+  };
+
+  const handleConfirmDeleteHandover = async () => {
+    if (!caps.canDeleteHandovers || !deleteTarget?.id) return;
+    setDeleting(true);
+    try {
+      await cloudApi.deleteHandover(deleteTarget.id);
+      setHandovers((prev) => prev.filter((x) => String(x.id) !== String(deleteTarget.id)));
+      setNotice({ type: 'ok', text: `Deleted shift handover #${deleteTarget.id} (${deleteTarget.date}).` });
+      setDeleteTarget(null);
+      await loadHandovers();
+    } catch (err) {
+      setNotice({ type: 'err', text: err?.message || 'Unable to delete shift handover.' });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -248,6 +266,16 @@ export default function HandoversView({ selectedDate, selectedShift, currentUser
                         Acknowledge
                       </button>
                     )}
+                    {caps.canDeleteHandovers && (
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        aria-label={`Delete handover ${h.id}`}
+                        onClick={() => setDeleteTarget(h)}
+                      >
+                        <Trash2 size={13} /> Delete
+                      </button>
+                    )}
                   </div>
                 </div>
                 {h.machine_summary && <p style={{ fontSize: '0.85rem', marginBottom: 4 }}><strong>Machines:</strong> {h.machine_summary}</p>}
@@ -259,6 +287,35 @@ export default function HandoversView({ selectedDate, selectedShift, currentUser
           </div>
         )}
       </section>
+
+      {deleteTarget && caps.canDeleteHandovers && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="del-ho-title">
+          <div className="modal-dialog" style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3 id="del-ho-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Delete Shift Handover?
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p>
+                Delete handover note <strong className="mono">#{deleteTarget.id}</strong> ({deleteTarget.date} • {deleteTarget.from_shift} → {deleteTarget.to_shift})?
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" onClick={handleConfirmDeleteHandover} disabled={deleting}>
+                {deleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -16,6 +16,7 @@ export function ScrapSectionPanel({
   onChangeReasons,
   actualQty = 0,
   idPrefix = 'part1',
+  stepLabel = '',
 }) {
   const numericScrap = Math.max(0, Number(scrapQty) || 0);
   const validation = validateScrapReasons(numericScrap, reasons, 5);
@@ -41,10 +42,10 @@ export function ScrapSectionPanel({
     <div className="subpanel-box is-scrap">
       <div className="subpanel-head">
         <div>
-          <strong style={{ fontSize: '0.84rem', color: 'var(--ink-primary)' }}>
-            Scrap Management — Part {partNumber}
+          <strong style={{ fontSize: '0.84rem', color: 'var(--status-err-ink)' }}>
+            {stepLabel ? `${stepLabel} ` : ''}Scrap Details — Part {partNumber}
           </strong>
-          <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--ink-secondary)' }}>
             Record scrap qty &amp; assign up to 5 scrap reasons (Reason total cannot exceed scrap qty)
           </div>
         </div>
@@ -189,6 +190,7 @@ export function DowntimeProblemsPanel({
   date,
   shift,
   hour,
+  stepLabel = '',
 }) {
   const activeCodes = (downtimeCodes && downtimeCodes.length > 0 ? downtimeCodes : DEFAULT_DOWNTIME_CODES).filter(
     (c) => c.is_active !== false
@@ -233,11 +235,11 @@ export function DowntimeProblemsPanel({
     <div className="subpanel-box is-downtime">
       <div className="subpanel-head">
         <div>
-          <strong style={{ fontSize: '0.88rem', color: 'var(--ink-primary)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <Clock size={15} style={{ color: 'var(--accent)' }} />
-            Downtime &amp; Problems (Max 5 Problems / Hour)
+          <strong style={{ fontSize: '0.88rem', color: 'var(--status-err-ink)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Clock size={15} style={{ color: 'var(--status-err)' }} />
+            {stepLabel ? `${stepLabel} ` : ''}Downtime Details &amp; Problems (Max 5 Problems / Hour)
           </strong>
-          <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', marginTop: 2 }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--ink-secondary)', marginTop: 2 }}>
             Context: <strong className="mono">{machine || '—'}</strong> • {date} • {shift} • {hour} • Operator: <strong>{operator || '—'}</strong>
           </div>
         </div>

@@ -18,6 +18,7 @@ export default function SettingsView({ currentUser, onOpenChangePassword }) {
     shift_c_end: '08:00',
     hours_per_shift: '8',
     target_efficiency_threshold: '85',
+    whatsapp_api_base_url: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -197,6 +198,18 @@ export default function SettingsView({ currentUser, onOpenChangePassword }) {
               }}
             />
           </div>
+          <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+            <label className="field-label" htmlFor="set-wa-url">Public Web / WhatsApp API Server URL (for Android APK Cloud Delivery)</label>
+            <input
+              id="set-wa-url"
+              type="url"
+              className="field-input mono"
+              value={settings.whatsapp_api_base_url || ''}
+              onChange={(e) => setSettings({ ...settings, whatsapp_api_base_url: e.target.value })}
+              placeholder="https://your-vercel-app.vercel.app (optional if using Supabase Edge Function)"
+            />
+            <span className="field-help">Used when sending automated WhatsApp Cloud API reports from the standalone Android APK.</span>
+          </div>
         </div>
       </form>
 
@@ -204,15 +217,20 @@ export default function SettingsView({ currentUser, onOpenChangePassword }) {
       <section className="surface-card">
         <div className="section-header">
           <div>
-            <h2 className="section-title">Admin Security & Password Recovery Email</h2>
+            <h2 className="section-title">Admin Account, Password &amp; Recovery Email</h2>
             <p className="section-subtitle">
-              Recovery codes are sent only after email ownership is verified via single-use code.
+              Update your User ID / username or password securely. Recovery codes require verified email ownership.
             </p>
           </div>
-          <button type="button" className="btn btn-secondary" onClick={onOpenChangePassword}>
-            <ShieldCheck size={15} />
-            Change Admin Password
-          </button>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-secondary" onClick={() => onOpenChangePassword('username')}>
+              Change User ID
+            </button>
+            <button type="button" className="btn btn-primary" onClick={() => onOpenChangePassword('password')}>
+              <ShieldCheck size={15} />
+              Change Password
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSetRecoveryEmail} style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -313,7 +331,7 @@ export default function SettingsView({ currentUser, onOpenChangePassword }) {
         {cloudApi.getSchemaSyncStatus().needsMigration && (
           <div className="banner is-warn" style={{ marginTop: 12 }}>
             <span>
-              Database schema upgrade available: run <code>supabase/migrations/202611260001_industrial_upgrade.sql</code> in Supabase SQL Editor to enable native relational <code>tools</code>, <code>scrap_entries</code>, and <code>part_index</code> multi-part columns. Fallback cloud sync is currently protecting all operations.
+              Database schema upgrade available: run <code>supabase/migrations/202611260001_industrial_upgrade.sql</code> and <code>202611270001_account_management_and_whatsapp.sql</code> in Supabase SQL Editor to enable native relational <code>tools</code>, <code>scrap_entries</code>, <code>user_profiles</code>, and WhatsApp Cloud API tables. Fallback cloud sync is currently protecting all operations.
             </span>
           </div>
         )}

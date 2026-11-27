@@ -56,6 +56,7 @@ export default function ToolsView({
   // Delete Confirm Dialog
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const loadFullToolHistory = async () => {
     setHistoryLoading(true);
@@ -210,16 +211,20 @@ export default function ToolsView({
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError('');
     try {
       const res = await cloudApi.deleteTool(deleteTarget.tool_number);
+      const removedNum = deleteTarget.tool_number;
       setNotice({
         type: 'ok',
-        message: `Removed tool ${deleteTarget.tool_number} from directory. ${res.preservedHistoryCount || 0} historical production record(s) preserved safely.`,
+        message: res?.message || `Removed tool ${removedNum} from directory. ${res.preservedHistoryCount || 0} historical production record(s) preserved safely.`,
       });
       setDeleteTarget(null);
       if (onReload) await onReload();
     } catch (err) {
-      setNotice({ type: 'err', message: err?.message || 'Unable to delete tool.' });
+      const msg = err?.message || 'Unable to delete tool.';
+      setDeleteError(msg);
+      setNotice({ type: 'err', message: msg });
     } finally {
       setDeleting(false);
     }
@@ -742,6 +747,13 @@ export default function ToolsView({
               </button>
             </div>
             <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {deleteError && (
+                <div className="banner is-err" role="alert">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <AlertCircle size={15} /> {deleteError}
+                  </span>
+                </div>
+              )}
               <p>
                 Delete tool <strong className="mono">{deleteTarget.tool_number}</strong> ({deleteTarget.part_name || 'No part name'}) from the Tool Directory?
               </p>
@@ -750,7 +762,7 @@ export default function ToolsView({
               </div>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button type="button" className="btn btn-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(''); }} disabled={deleting}>Cancel</button>
               <button type="button" className="btn btn-danger" onClick={handleConfirmDelete} disabled={deleting}>
                 {deleting ? 'Deleting...' : `Delete ${deleteTarget.tool_number}`}
               </button>

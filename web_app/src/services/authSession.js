@@ -54,6 +54,7 @@ export function saveActiveSession({ user, token = '', mode = 'supabase', expires
     user: {
       id: user.id ?? null,
       username: user.username,
+      auth_email: user.auth_email || '',
       full_name: user.full_name,
       role: user.role,
       department: user.department || 'Press Shop MFG-2',

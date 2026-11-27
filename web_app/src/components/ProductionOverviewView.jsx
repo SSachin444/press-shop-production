@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Trash2, ArrowRight, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Plus, Trash2, ArrowRight, RefreshCw, AlertCircle, CheckCircle2, ShieldAlert, X } from 'lucide-react';
 import { getCapabilities } from '../config/roles';
 import { cloudApi } from '../services/cloudClient';
 import { PLANTS, SHIFTS, computeProductionMetrics } from '../services/metrics';
@@ -36,6 +36,8 @@ export default function ProductionOverviewView({
     remarks: '',
   });
   const [savingPlan, setSavingPlan] = useState(false);
+  const [deletePlanTarget, setDeletePlanTarget] = useState(null);
+  const [deletingPlan, setDeletingPlan] = useState(false);
 
   const loadPlans = async (machine = '') => {
     setPlansLoading(true);
@@ -142,14 +144,22 @@ export default function ProductionOverviewView({
     }
   };
 
-  const handleDeletePlan = async (plan) => {
-    if (!caps.canManagePlans || !plan?.id) return;
+  const handleConfirmDeletePlan = async () => {
+    if (!caps.canManagePlans || !deletePlanTarget?.id) return;
+    setDeletingPlan(true);
     try {
-      await cloudApi.deletePlan(plan.id);
-      setNotice({ type: 'ok', text: `Removed tool plan ${plan.tool_number} from ${plan.machine_number}.` });
+      await cloudApi.deletePlan(deletePlanTarget.id);
+      setPlans((prev) => prev.filter((x) => String(x.id) !== String(deletePlanTarget.id)));
+      setNotice({
+        type: 'ok',
+        text: `Removed tool plan ${deletePlanTarget.tool_number} from ${deletePlanTarget.machine_number}.`,
+      });
+      setDeletePlanTarget(null);
       await loadPlans(selectedPlanMachine);
     } catch (err) {
       setNotice({ type: 'err', text: err?.message || 'Unable to remove plan.' });
+    } finally {
+      setDeletingPlan(false);
     }
   };
 
@@ -568,8 +578,8 @@ export default function ProductionOverviewView({
                           <td>
                             <button
                               type="button"
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => handleDeletePlan(p)}
+                              className="btn btn-danger btn-sm"
+                              onClick={() => setDeletePlanTarget(p)}
                               aria-label={`Delete plan ${p.tool_number}`}
                             >
                               <Trash2 size={14} />
@@ -584,6 +594,37 @@ export default function ProductionOverviewView({
               </div>
             )}
           </section>
+        </div>
+      )}
+
+      {deletePlanTarget && caps.canManagePlans && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="del-plan-title">
+          <div className="modal-dialog" style={{ maxWidth: 420 }}>
+            <div className="modal-head">
+              <h3 id="del-plan-title" className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--status-err-ink)' }}>
+                <ShieldAlert size={18} />
+                Remove Tool Plan?
+              </h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDeletePlanTarget(null)} disabled={deletingPlan}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p>
+                Remove tool plan slot <strong className="mono">#{deletePlanTarget.plan_index}</strong> (Tool{' '}
+                <strong className="mono">{deletePlanTarget.tool_number}</strong>) from machine{' '}
+                <strong className="mono">{deletePlanTarget.machine_number}</strong>?
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeletePlanTarget(null)} disabled={deletingPlan}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" onClick={handleConfirmDeletePlan} disabled={deletingPlan}>
+                {deletingPlan ? 'Removing...' : 'Confirm Remove'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

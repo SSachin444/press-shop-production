@@ -14,10 +14,12 @@ import {
   calculateTargetFromUph,
   extractBaseHourAndPart,
   getDefaultMachinesList,
+  normalizeWhatsAppPhone,
   validateDowntimeProblems,
   validateEmailAddress,
   validatePhoneNumber,
   validateScrapReasons,
+  validateTimeAllocation,
 } from './metrics';
 import { enqueuePendingSubmission } from './syncQueue';
 
@@ -30,8 +32,13 @@ const SUPABASE_ANON_KEY = (
   'sb_publishable_yd1zp9Wcufa-ZYpKv4DBbQ_wL-3xzhp'
 ).trim();
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+const PUBLIC_WEB_URL = (import.meta.env.VITE_PUBLIC_WEB_URL || '').trim().replace(/\/$/, '');
 
 const FALLBACK_TOOLS_SETTING_KEY = 'pha_tools_catalog_fallback';
+const FALLBACK_TOOLS_DELETED_KEY = 'pha_tools_deleted_fallback';
+const FALLBACK_WA_RECIPIENTS_KEY = 'pha_whatsapp_recipients_fallback';
+const FALLBACK_WA_HISTORY_KEY = 'pha_whatsapp_history_fallback';
+const WA_API_URL_SETTING_KEY = 'whatsapp_api_base_url';
 
 let supabaseInstance = null;
 const schemaStatus = {
@@ -149,6 +156,100 @@ function mapUsernameToAuthEmail(usernameOrEmail) {
   return `${clean}@phaindia.internal`;
 }
 
+function validateUsernameFormat(rawUsername) {
+  const clean = String(rawUsername || '').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(clean)) {
+    return {
+      valid: false,
+      normalized: clean,
+      error: 'User ID must be 3-32 characters (letters, digits, dot, underscore, or hyphen; starting with a letter or digit).',
+    };
+  }
+  return { valid: true, normalized: clean, error: '' };
+}
+
+function validateStrongPassword(pw) {
+  const s = String(pw || '');
+  if (s.length < 8) return { valid: false, error: 'New password must be at least 8 characters long.' };
+  if (!/[A-Z]/.test(s) || !/[a-z]/.test(s) || !/\d/.test(s)) {
+    return {
+      valid: false,
+      error: 'Password must include uppercase, lowercase, and at least one number.',
+    };
+  }
+  return { valid: true, error: '' };
+}
+
+function isNativeCapacitorRuntime() {
+  return (
+    typeof window !== 'undefined' &&
+    Boolean(window.Capacitor?.isNativePlatform?.() || window.location?.protocol === 'capacitor:')
+  );
+}
+
+async function resolveWhatsAppApiBaseUrl(client) {
+  if (API_BASE_URL) return API_BASE_URL;
+  if (PUBLIC_WEB_URL) return PUBLIC_WEB_URL;
+  if (client) {
+    try {
+      const { data } = await client
+        .from('app_settings')
+        .select('value')
+        .eq('key', WA_API_URL_SETTING_KEY)
+        .maybeSingle();
+      const configured = String(data?.value || '').trim().replace(/^"|"$/g, '').replace(/\/$/, '');
+      if (/^https?:\/\//i.test(configured)) return configured;
+    } catch {
+      // Ignore setting lookup error
+    }
+  }
+  if (
+    typeof window !== 'undefined' &&
+    !isNativeCapacitorRuntime() &&
+    /^https?:\/\//i.test(window.location?.origin || '') &&
+    !/:(5173|4173|3000)$/.test(window.location.origin)
+  ) {
+    return window.location.origin;
+  }
+  return '';
+}
+
+async function runVerifiedDelete(deletePromiseOrBuilder, entityLabel = 'record') {
+  const res =
+    typeof deletePromiseOrBuilder?.select === 'function'
+      ? await deletePromiseOrBuilder.select('*')
+      : await deletePromiseOrBuilder;
+  const { data, error } = res || {};
+  if (error) return { data, error };
+  if (Array.isArray(data) && data.length === 0) {
+    return {
+      data,
+      error: {
+        message: `No matching ${entityLabel} was deleted (record missing or blocked by database policy).`,
+        code: 'NO_ROWS_DELETED',
+      },
+    };
+  }
+  return { data, error: null };
+}
+
+async function getSettingJson(client, key, fallback = null) {
+  const { data } = await client.from('app_settings').select('value').eq('key', key).maybeSingle();
+  if (!data?.value) return fallback;
+  try {
+    return JSON.parse(data.value);
+  } catch {
+    return fallback;
+  }
+}
+
+async function setSettingJson(client, key, value) {
+  const { error } = await client
+    .from('app_settings')
+    .upsert({ key, value: JSON.stringify(value) }, { onConflict: 'key' });
+  if (error) throw new Error(error.message);
+}
+
 export const cloudApi = {
   getSchemaSyncStatus,
 
@@ -204,27 +305,74 @@ export const cloudApi = {
 
     let authUser = null;
     let authToken = null;
+    let resolvedAuthEmail = mapUsernameToAuthEmail(cleanUser);
+
+    if (!cleanUser.includes('@') && typeof client.rpc === 'function') {
+      try {
+        const { data: rpcEmail } = await client.rpc('resolve_login_email', {
+          p_username: cleanUser.toLowerCase(),
+          p_role: role,
+        });
+        if (rpcEmail && String(rpcEmail).includes('@')) {
+          resolvedAuthEmail = String(rpcEmail).trim().toLowerCase();
+        }
+      } catch {
+        // RPC optional when migration has not yet run
+      }
+    }
 
     try {
-      const authEmail = mapUsernameToAuthEmail(cleanUser);
       const { data, error } = await client.auth.signInWithPassword({
-        email: authEmail,
+        email: resolvedAuthEmail,
         password,
       });
       if (!error && data?.user && data?.session) {
-        const { data: profile } = await client
+        const { data: profile, error: profErr } = await client
           .from('user_profiles')
-          .select('id, username, full_name, role, department, recovery_email, recovery_email_verified, must_change_password, is_active')
+          .select('id, username, auth_email, full_name, role, department, recovery_email, recovery_email_verified, must_change_password, is_active')
           .eq('id', data.user.id)
           .maybeSingle();
 
-        if (profile && profile.is_active && profile.role === role) {
-          authUser = profile;
+        if (profile) {
+          if (!profile.is_active) {
+            throw new Error('Account is inactive. Contact Plant Administrator.');
+          }
+          if (profile.role !== role) {
+            throw new Error(`Account belongs to role "${profile.role}", not "${role}".`);
+          }
+          authUser = {
+            ...profile,
+            auth_email: profile.auth_email || data.user.email || resolvedAuthEmail,
+          };
           authToken = data.session.access_token;
+        } else {
+          // Handle schema before user_profiles migration or fallback profile metadata
+          const metaRole = data.user.app_metadata?.role || data.user.user_metadata?.role;
+          if (profErr && isMissingSchemaError(profErr)) {
+            markSchemaFeatureMissing('user_profiles_table');
+          }
+          if (!metaRole || metaRole === role) {
+            authUser = {
+              id: data.user.id,
+              username: String(data.user.user_metadata?.username || cleanUser.split('@')[0]).toLowerCase(),
+              auth_email: data.user.email || resolvedAuthEmail,
+              full_name: data.user.user_metadata?.full_name || (role === ROLES.ADMIN ? 'Plant Administrator' : 'Shift Supervisor'),
+              role,
+              department: data.user.user_metadata?.department || 'Press Shop MFG-2',
+              recovery_email: data.user.user_metadata?.recovery_email || '',
+              recovery_email_verified: false,
+              must_change_password: Boolean(data.user.user_metadata?.must_change_password),
+              is_active: true,
+            };
+            authToken = data.session.access_token;
+          }
         }
       }
-    } catch {
-      // Fallback to verified project credentials check below
+    } catch (err) {
+      if (err?.message && (err.message.includes('inactive') || err.message.includes('belongs to role'))) {
+        throw err;
+      }
+      // Fallback to verified project credentials check below when Supabase Auth user is not yet provisioned
     }
 
     if (!authUser) {
@@ -244,6 +392,7 @@ export const cloudApi = {
       authUser = {
         id: isAdmin ? 'admin-1' : 'supervisor-1',
         username: cleanUser.toLowerCase(),
+        auth_email: resolvedAuthEmail,
         full_name: isAdmin ? 'Plant Administrator' : 'Shift Supervisor',
         role,
         department: isAdmin ? 'Plant Management' : 'Press Shop MFG-2',
@@ -339,6 +488,12 @@ export const cloudApi = {
 
   async changePassword({ currentPassword, newPassword }) {
     assertCapability((c) => c.canChangeOwnPassword, 'Password change is restricted to Admin and Supervisor.');
+    const pwCheck = validateStrongPassword(newPassword);
+    if (!pwCheck.valid) throw new Error(pwCheck.error);
+    if (currentPassword === newPassword) {
+      throw new Error('New password must be different from your current password.');
+    }
+
     if (API_BASE_URL) {
       const res = await restRequest('/api/auth/change-password', {
         method: 'POST',
@@ -351,21 +506,153 @@ export const cloudApi = {
     const client = getSupabaseClient();
     if (!client) throw new Error('Cloud service not configured.');
     const session = getActiveSession();
-    const email = mapUsernameToAuthEmail(session.user.username);
+    const isLegacyFallbackSession = String(session?.token || '').startsWith('cloud:');
+    if (isLegacyFallbackSession) {
+      throw new Error(
+        'This account is signed in with offline fallback credentials because Supabase Auth users are not yet provisioned on the cloud project. Deploy the auth-bootstrap & SQL migrations in Supabase to enable live cloud password changes.'
+      );
+    }
 
-    const { error: verifyErr } = await client.auth.signInWithPassword({ email, password: currentPassword });
+    const authEmail =
+      session?.user?.auth_email ||
+      (await client.auth.getUser())?.data?.user?.email ||
+      mapUsernameToAuthEmail(session?.user?.username);
+
+    const { error: verifyErr } = await client.auth.signInWithPassword({
+      email: authEmail,
+      password: currentPassword,
+    });
     if (verifyErr) {
       throw new Error('Current password is incorrect.');
     }
 
-    const { error: fnErr, data } = await client.functions.invoke('password-recovery', {
-      body: { action: 'complete-password-change', new_password: newPassword },
-    });
-    if (fnErr || data?.error) {
-      throw new Error(data?.error || fnErr?.message || 'Failed to update password.');
+    // Use native Supabase Auth updateUser first (works reliably across all devices)
+    const { error: updateErr } = await client.auth.updateUser({ password: newPassword });
+    if (updateErr) {
+      throw new Error(updateErr.message || 'Failed to update password in Supabase Auth.');
     }
-    updateSessionUser({ must_change_password: false });
+
+    // Best-effort clear must_change_password flag on user_profiles & audit log via Edge Function or table update
+    try {
+      await client.functions.invoke('password-recovery', {
+        body: { action: 'complete-password-change', new_password: newPassword },
+      });
+    } catch {
+      // Edge function optional when auth.updateUser succeeded
+    }
+    try {
+      await client
+        .from('user_profiles')
+        .update({ must_change_password: false, password_changed_at: new Date().toISOString() })
+        .eq('id', session?.user?.id);
+    } catch {
+      // Optional if user_profiles not yet migrated
+    }
+
+    updateSessionUser({ must_change_password: false, auth_email: authEmail });
     return { success: true };
+  },
+
+  async changeUsername({ newUsername, currentPassword = '' }) {
+    assertCapability((c) => c.canChangeOwnUsername || c.canChangeOwnPassword, 'User ID changes are restricted to Admin and Supervisor.');
+    const check = validateUsernameFormat(newUsername);
+    if (!check.valid) throw new Error(check.error);
+
+    const session = getActiveSession();
+    const currentUser = String(session?.user?.username || '').trim().toLowerCase();
+    if (check.normalized === currentUser) {
+      throw new Error('Enter a new User ID different from your current User ID.');
+    }
+
+    if (API_BASE_URL) {
+      const res = await restRequest('/api/auth/change-username', {
+        method: 'POST',
+        body: JSON.stringify({ new_username: check.normalized, current_password: currentPassword }),
+      });
+      if (res?.user) {
+        updateSessionUser(res.user);
+      } else {
+        updateSessionUser({ username: check.normalized });
+      }
+      return res;
+    }
+
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud service not configured.');
+    if (String(session?.token || '').startsWith('cloud:')) {
+      throw new Error(
+        'This account is signed in with offline fallback credentials because Supabase Auth & user_profiles are not yet provisioned on the cloud project. Deploy the SQL migration to persist cloud User ID changes.'
+      );
+    }
+
+    const authEmail =
+      session?.user?.auth_email ||
+      (await client.auth.getUser())?.data?.user?.email ||
+      mapUsernameToAuthEmail(currentUser);
+
+    if (!currentPassword) {
+      throw new Error('Enter your current password to confirm the User ID change.');
+    }
+
+    const { error: verifyErr } = await client.auth.signInWithPassword({
+      email: authEmail,
+      password: currentPassword,
+    });
+    if (verifyErr) {
+      throw new Error('Current password is incorrect.');
+    }
+
+    // 1. Prefer atomic SECURITY DEFINER RPC (checks duplicates & preserves auth_email)
+    if (typeof client.rpc === 'function') {
+      const { data: rpcData, error: rpcErr } = await client.rpc('change_own_username', {
+        p_new_username: check.normalized,
+      });
+      if (!rpcErr && rpcData?.username) {
+        await client.auth.updateUser({ data: { username: rpcData.username } }).catch(() => {});
+        updateSessionUser({
+          username: rpcData.username,
+          auth_email: rpcData.auth_email || authEmail,
+        });
+        return { success: true, username: rpcData.username, auth_email: rpcData.auth_email || authEmail };
+      }
+      if (rpcErr && !String(rpcErr.message || '').toLowerCase().includes('function') && rpcErr.code !== 'PGRST202') {
+        throw new Error(rpcErr.message || 'Unable to update User ID.');
+      }
+    }
+
+    // 2. Try Edge Function fallback
+    const { data: fnData, error: fnErr } = await client.functions.invoke('password-recovery', {
+      body: { action: 'change-username', new_username: check.normalized },
+    });
+    if (!fnErr && fnData?.username) {
+      updateSessionUser({ username: fnData.username, auth_email: fnData.auth_email || authEmail });
+      return fnData;
+    }
+    if (fnData?.error) {
+      throw new Error(fnData.error);
+    }
+
+    // 3. Direct user_profiles + metadata fallback
+    const { data: dupCheck } = await client
+      .from('user_profiles')
+      .select('id')
+      .ilike('username', check.normalized)
+      .neq('id', session?.user?.id)
+      .maybeSingle();
+    if (dupCheck) {
+      throw new Error(`User ID "${check.normalized}" is already in use.`);
+    }
+
+    const { error: profUpdateErr } = await client
+      .from('user_profiles')
+      .update({ username: check.normalized, auth_email: authEmail, updated_at: new Date().toISOString() })
+      .eq('id', session?.user?.id);
+    if (profUpdateErr) {
+      throw new Error(profUpdateErr.message || 'Failed to update User ID.');
+    }
+    await client.auth.updateUser({ data: { username: check.normalized } }).catch(() => {});
+    updateSessionUser({ username: check.normalized, auth_email: authEmail });
+    return { success: true, username: check.normalized, auth_email: authEmail };
   },
 
   async setAdminRecoveryEmail(email) {
@@ -620,10 +907,13 @@ export const cloudApi = {
     await client.from('employees').update({ assigned_machine: '' }).eq('assigned_machine', cleanNum);
     await client.from('machine_plans').delete().eq('machine_number', cleanNum).in('status', ['Queued', 'In Setup', 'Ready']);
 
-    const { error } = await client.from('machines').delete().eq('machine_number', cleanNum);
+    const { error } = await runVerifiedDelete(
+      client.from('machines').delete().eq('machine_number', cleanNum),
+      `machine ${cleanNum}`
+    );
     if (error) {
       if (String(error.code) === '23503') {
-        throw new Error(`Cannot delete ${cleanNum}: active database foreign-key constraint references this machine. Run the latest schema migration first.`);
+        throw new Error(`Cannot delete ${cleanNum}: active database foreign-key constraint references this machine. Historical production records were preserved.`);
       }
       throw new Error(error.message);
     }
@@ -653,44 +943,42 @@ export const cloudApi = {
     const client = getSupabaseClient();
     if (!client) throw new Error('Cloud database is not configured.');
 
-    const { data, error } = await client.from('tools').select('*').order('tool_number');
-    if (!error) {
-      return data || [];
-    }
-    if (!isMissingSchemaError(error)) {
-      throw new Error(error.message);
-    }
-
-    // Fallback to app_settings catalog when migration 202611260001 has not been run yet
-    markSchemaFeatureMissing('tools_table');
-    const { data: settingRow } = await client
-      .from('app_settings')
-      .select('value')
-      .eq('key', FALLBACK_TOOLS_SETTING_KEY)
-      .maybeSingle();
-
-    let stored = [];
-    if (settingRow?.value) {
-      try {
-        stored = JSON.parse(settingRow.value);
-      } catch {
-        stored = [];
+    if (!schemaStatus.missingFeatures.has('tools_table')) {
+      const { data, error } = await client.from('tools').select('*').order('tool_number');
+      if (!error) {
+        return data || [];
       }
+      if (!isMissingSchemaError(error)) {
+        throw new Error(error.message);
+      }
+      markSchemaFeatureMissing('tools_table');
     }
 
-    // Also include distinct historical tool numbers from production_records if not already in fallback list
+    // Fallback to app_settings catalog + deleted tombstone list when migration has not been run yet
+    const [storedRaw, deletedRaw] = await Promise.all([
+      getSettingJson(client, FALLBACK_TOOLS_SETTING_KEY, []),
+      getSettingJson(client, FALLBACK_TOOLS_DELETED_KEY, []),
+    ]);
+
+    const stored = Array.isArray(storedRaw) ? storedRaw : [];
+    const deletedSet = new Set(
+      (Array.isArray(deletedRaw) ? deletedRaw : []).map((t) => String(t || '').trim().toUpperCase())
+    );
+
+    // Include distinct historical tool numbers from production_records unless explicitly deleted
     const { data: prodTools } = await client
       .from('production_records')
       .select('tool_number, production_type, uph')
       .not('tool_number', 'eq', '');
 
     const byNum = new Map();
-    (Array.isArray(stored) ? stored : []).forEach((t) => {
-      if (t?.tool_number) byNum.set(String(t.tool_number).toUpperCase(), t);
+    stored.forEach((t) => {
+      const tn = String(t?.tool_number || '').trim().toUpperCase();
+      if (tn && !deletedSet.has(tn)) byNum.set(tn, { ...t, tool_number: tn });
     });
     (prodTools || []).forEach((pr) => {
       const tn = String(pr.tool_number || '').trim().toUpperCase();
-      if (tn && !byNum.has(tn)) {
+      if (tn && !deletedSet.has(tn) && !byNum.has(tn)) {
         byNum.set(tn, {
           tool_number: tn,
           part_name: '',
@@ -761,17 +1049,20 @@ export const cloudApi = {
       throw new Error(error.message);
     }
 
-    // Fallback catalog in app_settings
+    // Fallback catalog in app_settings: remove from deleted tombstone first if re-added
     markSchemaFeatureMissing('tools_table');
+    const deletedRaw = await getSettingJson(client, FALLBACK_TOOLS_DELETED_KEY, []);
+    const nextDeleted = (Array.isArray(deletedRaw) ? deletedRaw : []).filter(
+      (t) => String(t || '').trim().toUpperCase() !== cleanNum
+    );
+    await setSettingJson(client, FALLBACK_TOOLS_DELETED_KEY, nextDeleted);
+
     const current = await this.getTools();
     const idx = current.findIndex((t) => String(t.tool_number).toUpperCase() === cleanNum);
     const savedItem = { ...row, id: idx >= 0 ? current[idx].id || Date.now() : Date.now() };
     const next = idx >= 0 ? current.map((t, i) => (i === idx ? savedItem : t)) : [...current, savedItem];
 
-    const { error: setErr } = await client
-      .from('app_settings')
-      .upsert({ key: FALLBACK_TOOLS_SETTING_KEY, value: JSON.stringify(next) }, { onConflict: 'key' });
-    if (setErr) throw new Error(setErr.message);
+    await setSettingJson(client, FALLBACK_TOOLS_SETTING_KEY, next);
     return savedItem;
   },
 
@@ -790,7 +1081,10 @@ export const cloudApi = {
       .select('id', { count: 'exact', head: true })
       .eq('tool_number', cleanNum);
 
-    const { error } = await client.from('tools').delete().eq('tool_number', cleanNum);
+    const { error } = await runVerifiedDelete(
+      client.from('tools').delete().eq('tool_number', cleanNum),
+      `tool ${cleanNum}`
+    );
     if (!error) {
       try {
         await client.from('activity_logs').insert({
@@ -806,30 +1100,48 @@ export const cloudApi = {
     }
 
     if (!isMissingSchemaError(error)) {
+      if (String(error.code) === '23503') {
+        await client
+          .from('tools')
+          .update({ status: 'Retired', is_active: false, updated_at: new Date().toISOString() })
+          .eq('tool_number', cleanNum);
+        return {
+          success: true,
+          archived: true,
+          preservedHistoryCount: historyCount || 0,
+          message: `Tool ${cleanNum} marked Retired to preserve active database references.`,
+        };
+      }
       throw new Error(error.message);
     }
 
+    // Fallback catalog in app_settings: delete from stored list AND add to deleted tombstone so prod history won't resurrect it
     markSchemaFeatureMissing('tools_table');
-    const { data: settingRow } = await client
-      .from('app_settings')
-      .select('value')
-      .eq('key', FALLBACK_TOOLS_SETTING_KEY)
-      .maybeSingle();
-    let stored = [];
-    if (settingRow?.value) {
-      try {
-        stored = JSON.parse(settingRow.value);
-      } catch {
-        stored = [];
-      }
-    }
-    const next = (Array.isArray(stored) ? stored : []).filter(
-      (t) => String(t.tool_number).toUpperCase() !== cleanNum
+    const [storedRaw, deletedRaw] = await Promise.all([
+      getSettingJson(client, FALLBACK_TOOLS_SETTING_KEY, []),
+      getSettingJson(client, FALLBACK_TOOLS_DELETED_KEY, []),
+    ]);
+    const next = (Array.isArray(storedRaw) ? storedRaw : []).filter(
+      (t) => String(t?.tool_number || '').trim().toUpperCase() !== cleanNum
     );
-    const { error: setErr } = await client
-      .from('app_settings')
-      .upsert({ key: FALLBACK_TOOLS_SETTING_KEY, value: JSON.stringify(next) }, { onConflict: 'key' });
-    if (setErr) throw new Error(setErr.message);
+    const deletedSet = new Set(
+      (Array.isArray(deletedRaw) ? deletedRaw : []).map((t) => String(t || '').trim().toUpperCase())
+    );
+    deletedSet.add(cleanNum);
+
+    await setSettingJson(client, FALLBACK_TOOLS_SETTING_KEY, next);
+    await setSettingJson(client, FALLBACK_TOOLS_DELETED_KEY, Array.from(deletedSet));
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Tool',
+        details: `Removed tool ${cleanNum} from Tool Catalog (preserved ${historyCount || 0} historical production records)`,
+      });
+    } catch {
+      // Non-fatal
+    }
     return { success: true, preservedHistoryCount: historyCount || 0 };
   },
 
@@ -918,7 +1230,8 @@ export const cloudApi = {
     const keepSet = new Set(cleanCodes.map((c) => c.code));
     const toRemove = (existing || []).map((e) => e.code).filter((code) => !keepSet.has(code));
     if (toRemove.length > 0) {
-      await client.from('downtime_codes').delete().in('code', toRemove);
+      const { error: delCodeErr } = await client.from('downtime_codes').delete().in('code', toRemove);
+      if (delCodeErr) throw new Error(delCodeErr.message);
     }
 
     for (const c of cleanCodes) {
@@ -993,6 +1306,128 @@ export const cloudApi = {
     return { success: true };
   },
 
+  async deleteMachineDowntime(downtimeId) {
+    assertCapability((c) => c.canDeleteDowntime || c.canDeleteMachines, 'Only Admin can delete downtime records.');
+    if (!downtimeId) throw new Error('Downtime record ID is required.');
+    if (API_BASE_URL) {
+      return await restRequest(`/api/machine-downtime/${downtimeId}`, { method: 'DELETE' });
+    }
+    const client = getSupabaseClient();
+    const { error } = await runVerifiedDelete(
+      client.from('machine_downtime').delete().eq('id', downtimeId),
+      `downtime record #${downtimeId}`
+    );
+    if (error) throw new Error(error.message);
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Downtime',
+        details: `Deleted downtime log #${downtimeId}`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return { success: true };
+  },
+
+  async deleteProductionRecord(recordId) {
+    assertCapability((c) => c.canDeleteProduction, 'Only Admin can delete production records.');
+    if (!recordId) throw new Error('Production record ID is required.');
+    if (API_BASE_URL) {
+      return await restRequest(`/api/production/records/${recordId}`, { method: 'DELETE' });
+    }
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    const { data: existing } = await client
+      .from('production_records')
+      .select('id, date, shift, machine_or_line, hour_interval, tool_number, actual_qty')
+      .eq('id', recordId)
+      .maybeSingle();
+
+    try {
+      await client.from('scrap_entries').delete().eq('production_record_id', recordId);
+    } catch {
+      // Optional table
+    }
+
+    const { error } = await runVerifiedDelete(
+      client.from('production_records').delete().eq('id', recordId),
+      `production record #${recordId}`
+    );
+    if (error) throw new Error(error.message);
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Production',
+        details: existing
+          ? `Deleted production record #${recordId}: ${existing.machine_or_line} ${existing.date} ${existing.shift} ${existing.hour_interval} Tool ${existing.tool_number} (Actual ${existing.actual_qty})`
+          : `Deleted production record #${recordId}`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return { success: true };
+  },
+
+  async deleteHourlyProductionSlot({ date, shift, machine_or_line, hour_interval }) {
+    assertCapability((c) => c.canDeleteProduction, 'Only Admin can delete hourly production entries.');
+    const cleanMachine = String(machine_or_line || '').trim().toUpperCase();
+    const { baseHour } = extractBaseHourAndPart(hour_interval);
+    if (!date || !shift || !cleanMachine || !baseHour) {
+      throw new Error('Date, Shift, Machine, and Hour Slot are required to delete this entry.');
+    }
+    if (API_BASE_URL) {
+      return await restRequest('/api/production/delete-slot', {
+        method: 'POST',
+        body: JSON.stringify({ date, shift, machine_or_line: cleanMachine, hour_interval: baseHour }),
+      });
+    }
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    const { data: matching, error: findErr } = await client
+      .from('production_records')
+      .select('id, tool_number, actual_qty')
+      .eq('date', date)
+      .eq('shift', shift)
+      .eq('machine_or_line', cleanMachine)
+      .or(`hour_interval.eq.${baseHour},hour_interval.like.${baseHour} [P%`);
+
+    if (findErr) throw new Error(findErr.message);
+    const ids = (matching || []).map((r) => r.id).filter(Boolean);
+    if (ids.length === 0) {
+      throw new Error(`No matching hourly production entries found for ${cleanMachine} (${baseHour}).`);
+    }
+
+    try {
+      await client.from('scrap_entries').delete().in('production_record_id', ids);
+    } catch {
+      // Optional table
+    }
+
+    const { error: delErr } = await runVerifiedDelete(
+      client.from('production_records').delete().in('id', ids),
+      `hourly entry ${cleanMachine} ${baseHour}`
+    );
+    if (delErr) throw new Error(delErr.message);
+
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'HourlyProduction',
+        details: `Deleted ${ids.length} hourly part row(s) for ${cleanMachine} on ${date} (${shift}, ${baseHour})`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return { success: true, deletedCount: ids.length };
+  },
+
   // ------------------------------------------------------------------
   // MULTI-PART PRODUCTION ENTRY (NC UP TO 3 PARTS, TANDEM UP TO 4 PARTS)
   // ------------------------------------------------------------------
@@ -1020,17 +1455,24 @@ export const cloudApi = {
       downtime_problems = [],
       remarks = '',
       entry_time,
+      tandem_mode = 'simultaneous',
     } = batchPayload;
 
     const cleanMachine = String(machine_or_line || '').trim().toUpperCase();
     const { baseHour } = extractBaseHourAndPart(hour_interval);
     const maxParts = production_type === 'Tandem' ? 4 : 3;
+    const enforcePool = production_type !== 'Tandem' || tandem_mode === 'sequential';
 
     if (!cleanMachine || !date || !shift || !baseHour || !operator_name?.trim()) {
       throw new Error('Date, Shift, Operator, Machine/Line, and Hour are required.');
     }
     if (!Array.isArray(parts) || parts.length === 0 || parts.length > maxParts) {
       throw new Error(`Enter between 1 and ${maxParts} part(s) for ${production_type}.`);
+    }
+
+    const timePoolCheck = validateTimeAllocation(parts, 60, enforcePool);
+    if (!timePoolCheck.valid) {
+      throw new Error(timePoolCheck.error);
     }
 
     // Validate Downtime Problems (up to 5, prevent overlapping/duplicate intervals)
@@ -1453,13 +1895,87 @@ export const cloudApi = {
 
   async deleteEmployee(empId) {
     assertCapability((c) => c.canDeleteEmployees, 'Only Admin can remove employees.');
+    const cleanId = String(empId || '').trim().toUpperCase();
+    if (!cleanId) throw new Error('Employee ID is required.');
     if (API_BASE_URL) {
-      return await restRequest(`/api/employees/${encodeURIComponent(empId)}`, { method: 'DELETE' });
+      return await restRequest(`/api/employees/${encodeURIComponent(cleanId)}`, { method: 'DELETE' });
     }
     const client = getSupabaseClient();
-    const { error } = await client.from('employees').delete().eq('emp_id', empId);
-    if (error) throw new Error(error.message);
-    return { success: true };
+    const { data: existing } = await client
+      .from('employees')
+      .select('emp_id, name')
+      .eq('emp_id', cleanId)
+      .maybeSingle();
+
+    const [{ count: attCount }, { count: prodCount }] = await Promise.all([
+      client.from('attendance').select('id', { count: 'exact', head: true }).eq('emp_id', cleanId),
+      existing?.name
+        ? client.from('production_records').select('id', { count: 'exact', head: true }).ilike('operator_name', existing.name)
+        : Promise.resolve({ count: 0 }),
+    ]);
+
+    if ((attCount || 0) > 0 || (prodCount || 0) > 0) {
+      // Preserve attendance & historical production records: archive safely instead of cascade-deleting
+      const { error: arcErr } = await client
+        .from('employees')
+        .update({ status: 'Inactive', assigned_machine: '', updated_at: new Date().toISOString() })
+        .eq('emp_id', cleanId);
+      if (arcErr) throw new Error(arcErr.message);
+
+      if (existing?.name) {
+        await client.from('machines').update({ assigned_operator: '' }).eq('assigned_operator', existing.name);
+      }
+      try {
+        await client.from('activity_logs').insert({
+          user_name: getActiveSession()?.user?.username || 'admin',
+          action: 'ARCHIVE',
+          record_type: 'Employee',
+          details: `Archived employee ${cleanId} as Inactive (preserved ${attCount || 0} attendance and ${prodCount || 0} production record(s))`,
+        });
+      } catch {
+        // Non-fatal
+      }
+      return {
+        success: true,
+        archived: true,
+        preservedAttendanceCount: attCount || 0,
+        preservedProductionCount: prodCount || 0,
+        message: `Employee ${cleanId} has historical attendance/production records and was safely archived (Inactive) without deleting history.`,
+      };
+    }
+
+    const { error } = await runVerifiedDelete(
+      client.from('employees').delete().eq('emp_id', cleanId),
+      `employee ${cleanId}`
+    );
+    if (error) {
+      if (String(error.code) === '23503') {
+        await client
+          .from('employees')
+          .update({ status: 'Inactive', assigned_machine: '', updated_at: new Date().toISOString() })
+          .eq('emp_id', cleanId);
+        return {
+          success: true,
+          archived: true,
+          message: `Employee ${cleanId} marked Inactive to preserve database references.`,
+        };
+      }
+      throw new Error(error.message);
+    }
+    if (existing?.name) {
+      await client.from('machines').update({ assigned_operator: '' }).eq('assigned_operator', existing.name);
+    }
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Employee',
+        details: `Deleted employee ${cleanId} from Manpower Directory`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return { success: true, archived: false };
   },
 
   async getAttendance(date, shift) {
@@ -1551,6 +2067,31 @@ export const cloudApi = {
     return data;
   },
 
+  async deleteHandover(handoverId) {
+    assertCapability((c) => c.canDeleteHandovers, 'Only Admin can delete shift handovers.');
+    if (!handoverId) throw new Error('Handover ID is required.');
+    if (API_BASE_URL) {
+      return await restRequest(`/api/handovers/${handoverId}`, { method: 'DELETE' });
+    }
+    const client = getSupabaseClient();
+    const { error } = await runVerifiedDelete(
+      client.from('shift_handovers').delete().eq('id', handoverId),
+      `shift handover #${handoverId}`
+    );
+    if (error) throw new Error(error.message);
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'admin',
+        action: 'DELETE',
+        record_type: 'Handover',
+        details: `Deleted shift handover log #${handoverId}`,
+      });
+    } catch {
+      // Non-fatal
+    }
+    return { success: true };
+  },
+
   async getPlans(machine = '') {
     if (API_BASE_URL) {
       const res = await restRequest(`/api/plans${machine ? `?machine=${encodeURIComponent(machine)}` : ''}`);
@@ -1595,12 +2136,26 @@ export const cloudApi = {
 
   async deletePlan(planId) {
     assertCapability((c) => c.canManagePlans, 'Only Admin and Supervisor can delete tool plans.');
+    if (!planId) throw new Error('Plan ID is required.');
     if (API_BASE_URL) {
       return await restRequest(`/api/plans/${planId}`, { method: 'DELETE' });
     }
     const client = getSupabaseClient();
-    const { error } = await client.from('machine_plans').delete().eq('id', planId);
+    const { error } = await runVerifiedDelete(
+      client.from('machine_plans').delete().eq('id', planId),
+      `tool plan #${planId}`
+    );
     if (error) throw new Error(error.message);
+    try {
+      await client.from('activity_logs').insert({
+        user_name: getActiveSession()?.user?.username || 'supervisor',
+        action: 'DELETE',
+        record_type: 'ToolPlan',
+        details: `Deleted machine tool plan #${planId}`,
+      });
+    } catch {
+      // Non-fatal
+    }
     return { success: true };
   },
 
@@ -1662,12 +2217,22 @@ export const cloudApi = {
     }
     const client = getSupabaseClient();
     const { data, error } = await client.functions.invoke('admin-users', { body: { action: 'list' } });
-    if (error || data?.error) throw new Error(data?.error || error?.message || 'Unable to load users.');
+    if (error || data?.error) {
+      const msg = String(data?.error || error?.message || '');
+      if (msg.includes('Failed to send') || msg.includes('404')) {
+        throw new Error('Supabase Edge Function "admin-users" is not deployed yet on this cloud project.');
+      }
+      throw new Error(msg || 'Unable to load users.');
+    }
     return data.users || [];
   },
 
   async createUserAccount(payload) {
     assertCapability((c) => c.canManageUsers, 'Only Admin can create user accounts.');
+    if (payload?.username) {
+      const uCheck = validateUsernameFormat(payload.username);
+      if (!uCheck.valid) throw new Error(uCheck.error);
+    }
     if (API_BASE_URL) {
       return await restRequest('/api/users', { method: 'POST', body: JSON.stringify(payload) });
     }
@@ -1676,6 +2241,31 @@ export const cloudApi = {
       body: { action: 'create', ...payload },
     });
     if (error || data?.error) throw new Error(data?.error || error?.message || 'Unable to create user.');
+    return data;
+  },
+
+  async updateUserAccount(userId, updates) {
+    assertCapability((c) => c.canManageUsers, 'Only Admin can modify user accounts.');
+    if (!userId) throw new Error('User ID is required.');
+    if (updates?.username) {
+      const uCheck = validateUsernameFormat(updates.username);
+      if (!uCheck.valid) throw new Error(uCheck.error);
+    }
+    if (updates?.temp_password) {
+      const pwCheck = validateStrongPassword(updates.temp_password);
+      if (!pwCheck.valid) throw new Error(pwCheck.error);
+    }
+    if (API_BASE_URL) {
+      return await restRequest(`/api/users/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      });
+    }
+    const client = getSupabaseClient();
+    const { data, error } = await client.functions.invoke('admin-users', {
+      body: { action: 'update-user', user_id: userId, ...updates },
+    });
+    if (error || data?.error) throw new Error(data?.error || error?.message || 'Unable to update user account.');
     return data;
   },
 
@@ -1707,5 +2297,383 @@ export const cloudApi = {
     ]);
     if (lErr) throw new Error(lErr.message);
     return { logs: logs || [], recovery_logs: recoveryRes?.data || [] };
+  },
+
+  // ------------------------------------------------------------------
+  // WHATSAPP REPORTS & META CLOUD API DELIVERY (ADMIN & SUPERVISOR)
+  // ------------------------------------------------------------------
+  async getWhatsAppStatus() {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    if (API_BASE_URL) {
+      return await restRequest('/api/whatsapp/status');
+    }
+    const client = getSupabaseClient();
+    const apiBase = await resolveWhatsAppApiBaseUrl(client);
+    if (apiBase) {
+      try {
+        const res = await fetch(`${apiBase}/api/whatsapp/status`, { method: 'GET' });
+        if (res.ok) {
+          const data = await res.json();
+          return { ...data, endpoint: `${apiBase}/api/whatsapp/status`, endpointAvailable: true };
+        }
+      } catch {
+        // Fall through to Supabase Edge Function check
+      }
+    }
+    if (client) {
+      try {
+        const { data, error } = await client.functions.invoke('whatsapp-report', {
+          body: { action: 'status' },
+        });
+        if (!error && data) {
+          return { ...data, endpoint: 'supabase://functions/whatsapp-report', endpointAvailable: true };
+        }
+      } catch {
+        // Edge Function not deployed yet
+      }
+    }
+    return {
+      configured: false,
+      endpointAvailable: false,
+      provider: 'Meta WhatsApp Business Platform Cloud API',
+      missingEnvVars: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'],
+      message:
+        'WhatsApp Cloud API server route is not reachable from this environment or missing WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID.',
+    };
+  },
+
+  async getWhatsAppRecipients() {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    if (API_BASE_URL) {
+      const res = await restRequest('/api/whatsapp/recipients');
+      return res.recipients || [];
+    }
+    const client = getSupabaseClient();
+    if (!client) throw new Error('Cloud database is not configured.');
+
+    const { data, error } = await client.from('whatsapp_recipients').select('*').order('created_at', { ascending: true });
+    if (!error) return data || [];
+    if (!isMissingSchemaError(error)) throw new Error(error.message);
+
+    markSchemaFeatureMissing('whatsapp_tables');
+    const fallback = await getSettingJson(client, FALLBACK_WA_RECIPIENTS_KEY, []);
+    return Array.isArray(fallback) ? fallback : [];
+  },
+
+  async saveWhatsAppRecipient(recipient, isEdit = false) {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    const name = String(recipient?.name || '').trim();
+    if (!name) throw new Error('Recipient name is required.');
+    const phoneCheck = normalizeWhatsAppPhone(recipient?.phone_number);
+    if (!phoneCheck.valid) throw new Error(phoneCheck.error);
+
+    if (API_BASE_URL) {
+      if (isEdit && recipient?.id) {
+        const res = await restRequest(`/api/whatsapp/recipients/${recipient.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name, phone_number: phoneCheck.normalized }),
+        });
+        return res.recipient;
+      }
+      const res = await restRequest('/api/whatsapp/recipients', {
+        method: 'POST',
+        body: JSON.stringify({ name, phone_number: phoneCheck.normalized }),
+      });
+      return res.recipient;
+    }
+
+    const client = getSupabaseClient();
+    const existing = await this.getWhatsAppRecipients();
+    const duplicate = existing.find(
+      (r) => r.phone_number === phoneCheck.normalized && (!isEdit || String(r.id) !== String(recipient.id))
+    );
+    if (duplicate) {
+      throw new Error(`WhatsApp number ${phoneCheck.normalized} is already saved (${duplicate.name}).`);
+    }
+    if (!isEdit && existing.length >= 5) {
+      throw new Error('Maximum 5 WhatsApp recipients are allowed. Delete one before adding another.');
+    }
+
+    const row = {
+      name,
+      phone_number: phoneCheck.normalized,
+      created_by: getActiveSession()?.user?.username || 'supervisor',
+      updated_at: new Date().toISOString(),
+    };
+
+    if (isEdit && recipient?.id) {
+      const { data, error } = await client
+        .from('whatsapp_recipients')
+        .update({ name, phone_number: phoneCheck.normalized, updated_at: row.updated_at })
+        .eq('id', recipient.id)
+        .select()
+        .single();
+      if (!error) return data;
+      if (!isMissingSchemaError(error)) throw new Error(error.message);
+
+      const next = existing.map((r) => (String(r.id) === String(recipient.id) ? { ...r, ...row } : r));
+      await setSettingJson(client, FALLBACK_WA_RECIPIENTS_KEY, next);
+      return next.find((r) => String(r.id) === String(recipient.id));
+    }
+
+    const { data, error } = await client.from('whatsapp_recipients').insert(row).select().single();
+    if (!error) {
+      try {
+        await client.from('activity_logs').insert({
+          user_name: row.created_by,
+          action: 'CREATE',
+          record_type: 'WhatsAppRecipient',
+          details: `Added WhatsApp recipient ${name} (${phoneCheck.normalized})`,
+        });
+      } catch {
+        // Non-fatal
+      }
+      return data;
+    }
+    if (!isMissingSchemaError(error)) throw new Error(error.message);
+
+    markSchemaFeatureMissing('whatsapp_tables');
+    const saved = { ...row, id: `wa-${Date.now()}`, created_at: new Date().toISOString() };
+    await setSettingJson(client, FALLBACK_WA_RECIPIENTS_KEY, [...existing, saved]);
+    return saved;
+  },
+
+  async deleteWhatsAppRecipient(recipientId) {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    if (!recipientId) throw new Error('Recipient ID is required.');
+    if (API_BASE_URL) {
+      return await restRequest(`/api/whatsapp/recipients/${recipientId}`, { method: 'DELETE' });
+    }
+    const client = getSupabaseClient();
+    const { error } = await runVerifiedDelete(
+      client.from('whatsapp_recipients').delete().eq('id', recipientId),
+      'WhatsApp recipient'
+    );
+    if (!error) return { success: true };
+    if (!isMissingSchemaError(error)) throw new Error(error.message);
+
+    const existing = await this.getWhatsAppRecipients();
+    const next = existing.filter((r) => String(r.id) !== String(recipientId));
+    if (next.length === existing.length) {
+      throw new Error('Recipient not found or already deleted.');
+    }
+    await setSettingJson(client, FALLBACK_WA_RECIPIENTS_KEY, next);
+    return { success: true };
+  },
+
+  async getWhatsAppHistory() {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    if (API_BASE_URL) {
+      const res = await restRequest('/api/whatsapp/history');
+      return res.history || [];
+    }
+    const client = getSupabaseClient();
+    if (!client) return [];
+    const { data, error } = await client
+      .from('whatsapp_reports_log')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (!error) return data || [];
+    if (!isMissingSchemaError(error)) throw new Error(error.message);
+
+    markSchemaFeatureMissing('whatsapp_tables');
+    const fallback = await getSettingJson(client, FALLBACK_WA_HISTORY_KEY, []);
+    return Array.isArray(fallback) ? fallback : [];
+  },
+
+  async recordWhatsAppHistory(entry) {
+    const client = getSupabaseClient();
+    if (!client || API_BASE_URL) return entry;
+
+    const row = {
+      report_type: entry.report_type || 'combined',
+      report_label: entry.report_label || 'Report',
+      recipients_json: entry.recipients_json || [],
+      recipient_count: Number(entry.recipient_count) || 0,
+      sent_count: Number(entry.sent_count) || 0,
+      failed_count: Number(entry.failed_count) || 0,
+      overall_status: entry.overall_status || 'failed',
+      message_preview: String(entry.message_preview || '').slice(0, 300),
+      filters_json: entry.filters_json || {},
+      sent_by: entry.sent_by || getActiveSession()?.user?.username || 'supervisor',
+      delivery_mode: entry.delivery_mode || 'cloud_api',
+      client_send_id: entry.client_send_id || null,
+    };
+
+    const { data, error } = await client.from('whatsapp_reports_log').insert(row).select().single();
+    if (!error) return data;
+    if (!isMissingSchemaError(error)) return { ...row, id: Date.now(), created_at: new Date().toISOString() };
+
+    const existing = (await getSettingJson(client, FALLBACK_WA_HISTORY_KEY, [])) || [];
+    if (row.client_send_id && existing.some((x) => x.client_send_id === row.client_send_id)) {
+      return existing.find((x) => x.client_send_id === row.client_send_id);
+    }
+    const saved = { ...row, id: `walog-${Date.now()}`, created_at: new Date().toISOString() };
+    await setSettingJson(client, FALLBACK_WA_HISTORY_KEY, [saved, ...existing].slice(0, 50));
+    return saved;
+  },
+
+  async sendWhatsAppReport({
+    report_type,
+    report_label,
+    report_text,
+    filters = {},
+    recipients = [],
+    client_send_id = '',
+  }) {
+    assertCapability((c) => c.canSendWhatsAppReports, 'WhatsApp Reports is restricted to Admin and Supervisor.');
+    const cleanRecipients = (recipients || []).slice(0, 5).map((r) => ({
+      name: String(r.name || '').trim(),
+      phone_number: normalizeWhatsAppPhone(r.phone_number).normalized || String(r.phone_number || '').trim(),
+    }));
+    if (cleanRecipients.length === 0) {
+      throw new Error('Select at least one recipient (max 5).');
+    }
+    const cleanMsg = String(report_text || '').trim();
+    if (!cleanMsg) {
+      throw new Error('Report message cannot be empty.');
+    }
+
+    const sendId = client_send_id || `wa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const payload = {
+      report_type,
+      report_label,
+      message: cleanMsg,
+      report_text: cleanMsg,
+      filters,
+      recipients: cleanRecipients,
+      client_send_id: sendId,
+    };
+
+    let responsePayload = null;
+    let httpOk = false;
+
+    if (API_BASE_URL) {
+      try {
+        responsePayload = await restRequest('/api/whatsapp/send', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        httpOk = Boolean(responsePayload?.success);
+      } catch (err) {
+        responsePayload = err?.payload || {
+          configured: false,
+          error: err.message,
+          results: cleanRecipients.map((r) => ({ ...r, status: 'failed', error: err.message })),
+        };
+      }
+    } else {
+      const client = getSupabaseClient();
+      const apiBase = await resolveWhatsAppApiBaseUrl(client);
+      let reachedEndpoint = false;
+
+      if (apiBase) {
+        try {
+          const res = await fetch(`${apiBase}/api/whatsapp/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (res.status !== 404) {
+            reachedEndpoint = true;
+            responsePayload = await res.json().catch(() => ({}));
+            httpOk = res.ok && Boolean(responsePayload?.success || responsePayload?.sent_count > 0);
+          }
+        } catch {
+          // Try Edge Function fallback below
+        }
+      }
+
+      if (!reachedEndpoint && client) {
+        try {
+          const { data, error } = await client.functions.invoke('whatsapp-report', {
+            body: { action: 'send', ...payload },
+          });
+          if (data) {
+            reachedEndpoint = true;
+            responsePayload = data;
+            httpOk = !error && Boolean(data.success || data.sent_count > 0);
+          } else if (error) {
+            responsePayload = {
+              configured: false,
+              error: error.message || 'WhatsApp Edge Function could not be reached.',
+              results: cleanRecipients.map((r) => ({
+                ...r,
+                status: 'failed',
+                error: error.message || 'Edge function failed',
+              })),
+            };
+          }
+        } catch (err) {
+          responsePayload = {
+            configured: false,
+            error: err.message,
+            results: cleanRecipients.map((r) => ({ ...r, status: 'failed', error: err.message })),
+          };
+        }
+      }
+
+      if (!responsePayload) {
+        responsePayload = {
+          configured: false,
+          error:
+            'WhatsApp Cloud API backend endpoint is not reachable or missing credentials (WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID).',
+          results: cleanRecipients.map((r) => ({
+            ...r,
+            status: 'failed',
+            error: 'Server Cloud API endpoint unavailable',
+          })),
+        };
+      }
+    }
+
+    const results = Array.isArray(responsePayload.results)
+      ? responsePayload.results
+      : cleanRecipients.map((r) => ({ ...r, status: 'failed', error: responsePayload.error || 'Failed' }));
+    const sentCount = results.filter((r) => r.status === 'sent').length;
+    const failedCount = results.length - sentCount;
+    const overallStatus = sentCount === results.length ? 'sent' : sentCount > 0 ? 'partial' : 'failed';
+
+    const logEntry = await this.recordWhatsAppHistory({
+      report_type,
+      report_label,
+      recipients_json: results,
+      recipient_count: results.length,
+      sent_count: sentCount,
+      failed_count: failedCount,
+      overall_status: overallStatus,
+      message_preview: cleanMsg,
+      filters_json: filters,
+      delivery_mode: 'cloud_api',
+      client_send_id: sendId,
+    });
+
+    if (sentCount > 0) {
+      try {
+        const client = getSupabaseClient();
+        await client?.from('activity_logs').insert({
+          user_name: getActiveSession()?.user?.username || 'supervisor',
+          action: 'WHATSAPP_SEND',
+          record_type: 'WhatsAppReport',
+          details: `Sent ${report_label} to ${sentCount}/${results.length} WhatsApp recipient(s)`,
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    return {
+      ok: httpOk || sentCount > 0,
+      configured: responsePayload.configured !== false,
+      overall_status: overallStatus,
+      sent_count: sentCount,
+      failed_count: failedCount,
+      results,
+      error: responsePayload.error || '',
+      missingEnvVars: responsePayload.missingEnvVars || [],
+      deduplicated: Boolean(responsePayload.deduplicated),
+      log_entry: logEntry,
+    };
   },
 };

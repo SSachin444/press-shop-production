@@ -255,6 +255,113 @@ class TestPHASecurityAndAPI(unittest.TestCase):
         throttled = self.client.post("/api/auth/forgot-password", json={"role": "Admin", "email": "nobody@test.local"})
         self.assertEqual(throttled.status_code, 429)
 
+    def test_08_uph_time_allocation_username_safe_deletes_and_whatsapp(self):
+        adm_client = app.test_client()
+        sup_client = app.test_client()
+        adm_token = adm_client.post("/api/auth/login", json={"username": "admin", "password": "RecoveredAdmin#2026", "role": "Admin"}).get_json()["token"]
+        adm_headers = {"Authorization": f"Bearer {adm_token}"}
+        sup_token = sup_client.post("/api/auth/login", json={"username": "supervisor", "password": "StrongSuper#2026", "role": "Supervisor"}).get_json()["token"]
+        sup_headers = {"Authorization": f"Bearer {sup_token}"}
+
+        # 1. Machine Speed (UPH) * 60 full-hour target and sequential 60-min pool enforcement
+        ok_batch = sup_client.post(
+            "/api/production/hourly-batch",
+            headers=sup_headers,
+            json={
+                "production_type": "NC",
+                "machine_or_line": "NC-01",
+                "date": "2026-11-27",
+                "shift": "Shift A",
+                "hour_interval": "Hour 1 (08:00-09:00)",
+                "operator_name": "SACHIN S",
+                "tandem_mode": "sequential",
+                "parts": [
+                    {"tool_number": "T10", "uph": 120, "running_minutes": 30, "actual_qty": 3500, "rejected_qty": 10},
+                    {"tool_number": "T20", "uph": 120, "running_minutes": 20, "actual_qty": 2300, "rejected_qty": 5},
+                ],
+            },
+        )
+        self.assertEqual(ok_batch.status_code, 200)
+        recs = ok_batch.get_json()["records"]
+        self.assertEqual(recs[0]["target_qty"], 3600)
+        self.assertEqual(recs[1]["target_qty"], 2400)
+
+        # Exceeding 60 minutes on NC hour pool is rejected cleanly
+        over_pool = sup_client.post(
+            "/api/production/hourly-batch",
+            headers=sup_headers,
+            json={
+                "production_type": "NC",
+                "machine_or_line": "NC-01",
+                "date": "2026-11-27",
+                "shift": "Shift A",
+                "hour_interval": "Hour 2 (09:00-10:00)",
+                "operator_name": "SACHIN S",
+                "parts": [
+                    {"tool_number": "T10", "uph": 120, "running_minutes": 40, "actual_qty": 4500},
+                    {"tool_number": "T20", "uph": 120, "running_minutes": 30, "actual_qty": 3000},
+                ],
+            },
+        )
+        self.assertEqual(over_pool.status_code, 400)
+
+        # Delete hourly production slot works cleanly and returns 404 on retry
+        del_slot = adm_client.post(
+            "/api/production/delete-slot",
+            headers=adm_headers,
+            json={"machine_or_line": "NC-01", "date": "2026-11-27", "shift": "Shift A", "hour_interval": "Hour 1 (08:00-09:00)"},
+        )
+        self.assertEqual(del_slot.status_code, 200)
+        self.assertEqual(del_slot.get_json()["deleted"], 2)
+
+        # 2. Safe employee delete archives when attendance exists without cascade-deleting attendance
+        adm_client.post(
+            "/api/employees",
+            headers=adm_headers,
+            json={"emp_id": "E901", "name": "Test Operator", "department": "NC Production"},
+        )
+        sup_client.post(
+            "/api/attendance",
+            headers=sup_headers,
+            json={"records": [{"emp_id": "E901", "date": "2026-11-27", "shift": "Shift A", "status": "Present"}]},
+        )
+        arc_res = adm_client.delete("/api/employees/E901", headers=adm_headers)
+        self.assertEqual(arc_res.status_code, 200)
+        self.assertTrue(arc_res.get_json().get("archived"))
+        att_after = sup_client.get("/api/attendance?date=2026-11-27&shift=Shift A", headers=sup_headers).get_json()["attendance"]
+        self.assertTrue(any(a["emp_id"] == "E901" for a in att_after))
+
+        # 3. Change User ID / Username preserves password & role and blocks duplicates
+        chg_user = sup_client.post(
+            "/api/auth/change-username",
+            headers=sup_headers,
+            json={"new_username": "shift_sup_1", "current_password": "StrongSuper#2026"},
+        )
+        self.assertEqual(chg_user.status_code, 200)
+        relogin = app.test_client().post("/api/auth/login", json={"username": "shift_sup_1", "password": "StrongSuper#2026", "role": "Supervisor"})
+        self.assertEqual(relogin.status_code, 200)
+
+        # 4. WhatsApp recipients max 5 + E.164 + honest 503 when credentials unset
+        for idx in range(5):
+            r_add = sup_client.post(
+                "/api/whatsapp/recipients",
+                headers=sup_headers,
+                json={"name": f"Lead {idx+1}", "phone_number": f"+91987654321{idx}"},
+            )
+            self.assertEqual(r_add.status_code, 201)
+        over_rec = sup_client.post(
+            "/api/whatsapp/recipients",
+            headers=sup_headers,
+            json={"name": "Lead 6", "phone_number": "+919876543219"},
+        )
+        self.assertEqual(over_rec.status_code, 400)
+        send_unconfigured = sup_client.post(
+            "/api/whatsapp/send",
+            headers=sup_headers,
+            json={"message": "Hourly Shift Report", "recipients": [{"name": "Lead 1", "phone_number": "+919876543210"}]},
+        )
+        self.assertEqual(send_unconfigured.status_code, 503)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

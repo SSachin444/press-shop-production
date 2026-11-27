@@ -19,6 +19,8 @@ export default function EmployeesView({ machines, currentUser }) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const [form, setForm] = useState({
     emp_id: '',
     name: '',
@@ -165,13 +167,23 @@ export default function EmployeesView({ machines, currentUser }) {
 
   const confirmDelete = async () => {
     if (!caps.canDeleteEmployees || !deleteTarget) return;
+    setDeleting(true);
+    setDeleteError('');
     try {
-      await cloudApi.deleteEmployee(deleteTarget.emp_id);
+      const targetId = deleteTarget.emp_id;
+      const res = await cloudApi.deleteEmployee(targetId);
       setDeleteTarget(null);
-      setNotice({ type: 'ok', text: `Removed employee ${deleteTarget.emp_id}. Historical production records remain preserved.` });
+      setNotice({
+        type: 'ok',
+        text: res?.message || `Removed employee ${targetId}. Historical production records remain preserved.`,
+      });
       await loadEmployees();
     } catch (err) {
-      setNotice({ type: 'err', text: err?.message || 'Unable to delete employee.' });
+      const msg = err?.message || 'Unable to delete employee.';
+      setDeleteError(msg);
+      setNotice({ type: 'err', text: msg });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -550,19 +562,30 @@ export default function EmployeesView({ machines, currentUser }) {
       {/* Delete Confirm Modal (Admin only) */}
       {deleteTarget && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirm employee removal">
-          <div className="modal-dialog" style={{ maxWidth: 420 }}>
+          <div className="modal-dialog" style={{ maxWidth: 440 }}>
             <div className="modal-head">
               <h3 className="section-title">Confirm Removal</h3>
             </div>
-            <div className="modal-body">
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {deleteError && (
+                <div className="banner is-err" role="alert">
+                  <span>{deleteError}</span>
+                </div>
+              )}
               <p>
                 Remove employee <strong className="mono">{deleteTarget.emp_id}</strong> ({deleteTarget.name})?
-                Historical production records will retain their name.
               </p>
+              <div className="banner is-ok" style={{ fontSize: '0.8rem' }}>
+                <span>
+                  Historical production records and attendance logs are NEVER cascade-deleted. If linked records exist, the employee is safely archived as Inactive.
+                </span>
+              </div>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>Cancel</button>
-              <button type="button" className="btn btn-danger" onClick={confirmDelete}>Delete Employee</button>
+              <button type="button" className="btn btn-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(''); }} disabled={deleting}>Cancel</button>
+              <button type="button" className="btn btn-danger" onClick={confirmDelete} disabled={deleting}>
+                {deleting ? 'Deleting...' : 'Delete Employee'}
+              </button>
             </div>
           </div>
         </div>

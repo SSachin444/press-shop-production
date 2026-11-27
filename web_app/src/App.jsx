@@ -31,6 +31,7 @@ import HandoversView from './components/HandoversView';
 import UsersView from './components/UsersView';
 import AuditLogView from './components/AuditLogView';
 import SettingsView from './components/SettingsView';
+import WhatsAppReportsView from './components/WhatsAppReportsView';
 
 function getTodayIso() {
   const now = new Date();
@@ -73,8 +74,14 @@ export default function App() {
 
   // Modals & Alerts
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [accountModalTab, setAccountModalTab] = useState('password');
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [dismissedNotifications, setDismissedNotifications] = useState([]);
+
+  const openAccountModal = useCallback((initialTab = 'password') => {
+    setAccountModalTab(initialTab === 'username' ? 'username' : 'password');
+    setPasswordModalOpen(true);
+  }, []);
 
   const currentUser = session?.user || null;
   const mustChangePassword = Boolean(currentUser?.must_change_password);
@@ -148,11 +155,17 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, [currentUser?.role, navigateToTab]);
 
-  // Core data loader (with in-flight mutex so 5s refreshes never overlap)
+  // Core data loader (with in-flight mutex for background 5s polling; force/manual reloads always run cleanly)
   const loadOperationalData = useCallback(
-    async ({ silent = false } = {}) => {
+    async ({ silent = false, force = false } = {}) => {
       if (!currentUser || mustChangePassword) return;
-      if (syncInFlightRef.current && silent) return;
+      if (syncInFlightRef.current && silent && !force) return;
+      if (syncInFlightRef.current && force) {
+        // Wait briefly for any in-flight poll to settle before running forced refresh
+        for (let i = 0; i < 15 && syncInFlightRef.current; i += 1) {
+          await new Promise((r) => setTimeout(r, 80));
+        }
+      }
       syncInFlightRef.current = true;
       if (!silent) {
         setDataState((prev) => (prev === 'ready' ? 'ready' : 'loading'));
@@ -366,9 +379,12 @@ export default function App() {
           <PasswordModal
             isOpen={true}
             forced={true}
-            onCompleted={() => {
+            currentUser={currentUser}
+            onCompleted={(updated) => {
               setSession((prev) =>
-                prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+                prev
+                  ? { ...prev, user: { ...prev.user, ...(updated || {}), must_change_password: false } }
+                  : prev
               );
             }}
           />
@@ -450,7 +466,7 @@ export default function App() {
             currentUser={currentUser}
             onEntrySaved={() => {
               setPendingSyncCount(getSyncQueue().length);
-              loadOperationalData({ silent: true });
+              loadOperationalData({ force: true });
             }}
           />
         );
@@ -470,7 +486,7 @@ export default function App() {
             currentUser={currentUser}
             onEntrySaved={() => {
               setPendingSyncCount(getSyncQueue().length);
-              loadOperationalData({ silent: true });
+              loadOperationalData({ force: true });
             }}
           />
         );
@@ -481,7 +497,7 @@ export default function App() {
             machines={machines}
             records={records}
             currentUser={currentUser}
-            onReload={() => loadOperationalData({ silent: true })}
+            onReload={() => loadOperationalData({ force: true })}
           />
         );
       case 'production-summary':
@@ -493,6 +509,8 @@ export default function App() {
             tools={tools}
             records={records}
             downtimes={downtimes}
+            currentUser={currentUser}
+            onReload={() => loadOperationalData({ force: true })}
           />
         );
       case 'cell-status':
@@ -508,7 +526,7 @@ export default function App() {
             dataState={dataState}
             lastSyncedAt={lastSyncedAt}
             isOnline={isOnline}
-            onRefresh={() => loadOperationalData()}
+            onRefresh={() => loadOperationalData({ force: true })}
           />
         );
       case 'production':
@@ -525,7 +543,7 @@ export default function App() {
             downtimes={downtimes}
             currentUser={currentUser}
             onNavigate={navigateToTab}
-            onRefresh={() => loadOperationalData()}
+            onRefresh={() => loadOperationalData({ force: true })}
           />
         );
       case 'employees':
@@ -547,7 +565,7 @@ export default function App() {
             downtimes={downtimes}
             downtimeCodes={downtimeCodes}
             currentUser={currentUser}
-            onReload={() => loadOperationalData({ silent: true })}
+            onReload={() => loadOperationalData({ force: true })}
           />
         );
       case 'handovers':
@@ -565,8 +583,9 @@ export default function App() {
             selectedDate={selectedDate}
             machines={machines}
             records={reportRecords || records}
+            currentUser={currentUser}
             onRefresh={async () => {
-              await loadOperationalData();
+              await loadOperationalData({ force: true });
               try {
                 const allRecs = await cloudApi.getProductionRecords({});
                 setReportRecords(allRecs || []);
@@ -574,6 +593,18 @@ export default function App() {
                 // Keep existing date records
               }
             }}
+          />
+        );
+      case 'whatsapp-reports':
+        return (
+          <WhatsAppReportsView
+            selectedDate={selectedDate}
+            selectedShift={selectedShift}
+            machines={machines}
+            tools={tools}
+            records={reportRecords || records}
+            downtimes={downtimes}
+            currentUser={currentUser}
           />
         );
       case 'users':
@@ -584,7 +615,7 @@ export default function App() {
         return (
           <SettingsView
             currentUser={currentUser}
-            onOpenChangePassword={() => setPasswordModalOpen(true)}
+            onOpenChangePassword={openAccountModal}
           />
         );
       default:
@@ -608,7 +639,7 @@ export default function App() {
           onRetryPendingSync={handleFlushPendingQueue}
           notifications={notifications}
           onOpenNotifications={() => setNotificationsOpen(true)}
-          onOpenChangePassword={() => setPasswordModalOpen(true)}
+          onOpenChangePassword={openAccountModal}
           onSignOut={handleSignOut}
         >
           {routeNotice && (
@@ -622,10 +653,14 @@ export default function App() {
         <PasswordModal
           isOpen={passwordModalOpen}
           forced={false}
+          currentUser={currentUser}
+          initialTab={accountModalTab}
           onClose={() => setPasswordModalOpen(false)}
-          onCompleted={() => {
+          onCompleted={(updated) => {
             setSession((prev) =>
-              prev ? { ...prev, user: { ...prev.user, must_change_password: false } } : prev
+              prev
+                ? { ...prev, user: { ...prev.user, ...(updated || {}), must_change_password: false } }
+                : prev
             );
           }}
         />
